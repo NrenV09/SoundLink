@@ -1,0 +1,49 @@
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build && cp dist/index.html dist/404.html && cp dist/index.html dist/SoundLink_Offline.html && cp dist/index.html dist/QuantumLink.html && touch dist/.nojekyll && mkdir -p \"FINAL NEXUS\" build private && cp dist/index.html \"FINAL NEXUS/index.html\" && cp dist/index.html \"FINAL NEXUS/FinalNexus.html\" && cp dist/index.html build/finalwork.html && cp dist/index.html build/index.html && cp dist/index.html private/finalwork.html && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build:pages": "vite build && cp dist/index.html dist/404.html && cp dist/index.html dist/SoundLink_Offline.html && cp dist/index.html dist/QuantumLink.html && touch dist/.nojekyll",
+    "start": "node dist/server.cjs",
+    "preview": "vite preview",
+    "clean": "rm -rf dist private build",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.10",
+    "@google/genai": "^1.29.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "clsx": "^2.1.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "ggwave": "^0.4.0",
+    "html5-qrcode": "^2.3.8",
+    "lucide-react": "^0.546.0",
+    "lz-string": "^1.5.0",
+    "motion": "^12.23.24",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "tailwind-merge": "^3.5.0",
+    "vite": "^6.2.3",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@types/ws": "^8.18.1",
+    "autoprefixer": "^10.4.21",
+    "esbuild": "^0.28.2",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3",
+    "vite-plugin-pwa": "^1.3.0",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

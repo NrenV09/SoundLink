@@ -233,7 +233,7 @@ export default function App() {
 
   return (
     <div
-      className="min-h-screen flex flex-col selection:bg-blue-500/30 relative overflow-x-hidden pb-24 sm:pb-8"
+      className="min-h-screen flex flex-col selection:bg-blue-500/30 relative overflow-x-hidden pb-28 sm:pb-10"
       style={{
         background: 'var(--md-sys-color-surface)',
         color: 'var(--md-sys-color-on-surface)',
@@ -245,6 +245,7 @@ export default function App() {
           <img
             src={themeState.customWallpaperUrl}
             alt=""
+            referrerPolicy="no-referrer"
             className="w-full h-full object-cover opacity-20 dark:opacity-15 scale-110 blur-3xl transition-opacity duration-700"
           />
           <div
@@ -258,20 +259,26 @@ export default function App() {
       ) : (
         <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
           <div
-            className="absolute -top-32 -left-32 w-96 h-96 rounded-full opacity-20 blur-3xl transition-colors duration-700"
+            className="absolute -top-36 -left-36 w-[28rem] h-[28rem] rounded-full opacity-25 blur-3xl transition-colors duration-700"
             style={{ background: 'var(--md-sys-color-primary-container)' }}
           />
           <div
-            className="absolute top-1/3 -right-32 w-96 h-96 rounded-full opacity-15 blur-3xl transition-colors duration-700"
+            className="absolute top-1/3 -right-36 w-[28rem] h-[28rem] rounded-full opacity-20 blur-3xl transition-colors duration-700"
             style={{ background: 'var(--md-sys-color-tertiary-container)' }}
           />
         </div>
       )}
 
-      {/* Android 16 Material You Expressive Top App Bar */}
-      <header className="sticky top-0 z-30 px-3 sm:px-6 pt-2 sm:pt-3 pb-2">
-        <div className="max-w-6xl mx-auto m3-card px-3.5 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-2 backdrop-blur-xl bg-[var(--md-sys-color-surface-container)]/90">
-          <div className="flex items-center gap-3">
+      {/* Clean, Unboxed Android 16 Material You Top Bar */}
+      <header
+        className="sticky top-0 z-30 backdrop-blur-xl transition-colors"
+        style={{
+          backgroundColor: 'color-mix(in srgb, var(--md-sys-color-surface) 82%, transparent)',
+        }}
+      >
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-4">
+          {/* Zone 1: Brand Lockup */}
+          <div className="flex items-center gap-2.5 shrink-0">
             <div
               onClick={handleLogoClick}
               className="relative flex items-center justify-center cursor-pointer select-none transition-transform active:scale-90"
@@ -283,89 +290,100 @@ export default function App() {
                 size="sm"
               />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base sm:text-lg font-extrabold tracking-tight text-[var(--md-sys-color-on-surface)]">
-                  Sound Link
-                </h1>
-                <span
-                  className="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider"
+            <span className="text-base sm:text-lg font-extrabold tracking-tight text-[var(--md-sys-color-on-surface)] whitespace-nowrap">
+              Sound Link
+            </span>
+          </div>
+
+          {/* Zone 2: Desktop Floating Pill Navigation */}
+          <nav
+            className="hidden md:flex items-center p-1 rounded-full gap-1"
+            style={{ background: 'var(--md-sys-color-surface-container-low)' }}
+          >
+            {(
+              [
+                { id: 'waver', label: 'Acoustic Studio', icon: 'surround_sound' },
+                { id: 'chat', label: 'Sonic Chat', icon: 'forum', badge: unreadChatCount },
+                { id: 'qr', label: 'QR Code', icon: 'qr_code_2' },
+                { id: 'base64', label: 'Base64', icon: 'data_object' },
+              ] as const
+            ).map((tab) => {
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => {
+                    triggerHaptic('light', themeState.hapticsEnabled);
+                    setActiveTab(tab.id);
+                  }}
+                  className="relative flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold tracking-wide transition-all cursor-pointer whitespace-nowrap shrink-0"
                   style={{
-                    background: wasmStatus.ready
+                    background: isActive
                       ? 'var(--md-sys-color-secondary-container)'
-                      : 'var(--md-sys-color-surface-container-highest)',
-                    color: wasmStatus.ready
+                      : 'transparent',
+                    color: isActive
                       ? 'var(--md-sys-color-on-secondary-container)'
                       : 'var(--md-sys-color-on-surface-variant)',
                   }}
                 >
-                  <MaterialSymbol name="memory" className="text-[11px]" />
-                  <span>{wasmStatus.ready ? 'WASM Cached' : 'Loading WASM'}</span>
-                </span>
-              </div>
-              <p className="text-[11px] font-medium text-[var(--md-sys-color-on-surface-variant)] hidden sm:block">
-                Waver Acoustic Data-Over-Sound · 100% Offline M3 Expressive Suite
-              </p>
-            </div>
-          </div>
+                  <MaterialSymbol name={tab.icon} filled={isActive} className="text-sm" />
+                  <span>{tab.label}</span>
+                  {'badge' in tab && tab.badge ? (
+                    <span
+                      className="px-1.5 py-0.5 text-[10px] rounded-full font-extrabold"
+                      style={{
+                        background: 'var(--md-sys-color-primary)',
+                        color: 'var(--md-sys-color-on-primary)',
+                      }}
+                    >
+                      {tab.badge}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </nav>
 
-          <div className="flex items-center gap-1.5 sm:gap-2">
+          {/* Zone 3: Compact Touch-Friendly Action Controls (44x44px hitboxes on mobile) */}
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
             {/* Identity Chip */}
             <button
               onClick={() => {
                 triggerHaptic('light', themeState.hapticsEnabled);
                 setIsProfileOpen(true);
               }}
-              className="m3-btn-tonal flex items-center gap-2 px-3 py-2 text-xs sm:text-sm cursor-pointer"
+              className="m3-btn-tonal min-h-[40px] px-3 sm:px-3.5 py-1.5 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
               title="Node Identity Profile"
             >
-              <span
-                className="w-2 h-2 rounded-full"
-                style={{ background: 'var(--md-sys-color-primary)' }}
-              />
-              <span className="font-bold truncate max-w-[96px] sm:max-w-[140px]">
+              <span className="truncate max-w-[84px] sm:max-w-[120px]">
                 {profile.username}
               </span>
             </button>
 
-            {/* Offline Cache Drawer Toggle */}
+            {/* Offline Cache Vault */}
             <button
               onClick={() => {
                 triggerHaptic('light', themeState.hapticsEnabled);
                 refreshCachedFiles();
                 setIsCacheDrawerOpen((v) => !v);
               }}
-              className="m3-btn-tonal p-2 sm:px-3 sm:py-2 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-              title="Offline Sandbox Cache & WASM Storage"
+              className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
+              title="Offline Sandbox Cache & WASM Vault"
             >
-              <MaterialSymbol name="database" className="text-base" />
-              <span className="hidden lg:inline">Cache ({cachedFiles.length + 1})</span>
+              <MaterialSymbol name="database" className="text-lg" />
             </button>
 
-            {/* Material You Settings Modal Trigger */}
-            <button
-              onClick={() => {
-                triggerHaptic('medium', themeState.hapticsEnabled);
-                setIsM3SettingsOpen(true);
-              }}
-              className="m3-btn-tonal p-2 sm:px-3 sm:py-2 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-              title="Material You Theme & Wallpaper Studio"
-            >
-              <MaterialSymbol name="palette" filled className="text-base" />
-              <span className="hidden md:inline">Material You</span>
-            </button>
-
-            {/* Quick Seed Color Swatch Popover */}
-            <div className="relative">
+            {/* Quick Seed Color Swatch Popover (Desktop/Tablet) */}
+            <div className="relative hidden sm:block">
               <button
                 onClick={() => {
                   triggerHaptic('light', themeState.hapticsEnabled);
                   setIsColorPickerOpen((v) => !v);
                 }}
-                className="p-2 rounded-2xl transition-all hover:bg-[var(--md-sys-color-surface-container-highest)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer flex items-center justify-center"
-                title="Quick Dynamic Color Seed"
+                className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
+                title="Material You Theme & Seed Color"
               >
-                <MaterialSymbol name="colors" className="text-lg" />
+                <MaterialSymbol name="palette" className="text-lg" />
               </button>
 
               <AnimatePresence>
@@ -374,24 +392,24 @@ export default function App() {
                     initial={{ opacity: 0, scale: 0.92, y: 8 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.92, y: 8 }}
-                    className="absolute right-0 mt-2 p-3.5 rounded-3xl shadow-2xl border border-[var(--md-sys-color-outline-variant)] z-50 w-56 flex flex-col gap-3"
+                    className="absolute right-0 mt-2 p-4 rounded-[28px] shadow-2xl z-50 w-60 flex flex-col gap-3"
                     style={{ background: 'var(--md-sys-color-surface-container-high)' }}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--md-sys-color-on-surface-variant)]">
-                        M3 Seed Palette
+                      <span className="text-xs font-bold text-[var(--md-sys-color-on-surface)]">
+                        Dynamic Seed
                       </span>
                       <button
                         onClick={() => {
                           setIsColorPickerOpen(false);
                           setIsM3SettingsOpen(true);
                         }}
-                        className="text-[10px] font-bold text-[var(--md-sys-color-primary)] hover:underline cursor-pointer"
+                        className="text-xs font-bold text-[var(--md-sys-color-primary)] hover:underline cursor-pointer"
                       >
                         Full Studio
                       </button>
                     </div>
-                    <div className="grid grid-cols-4 gap-2">
+                    <div className="grid grid-cols-4 gap-2.5">
                       {MATERIAL_SEED_PRESETS.map((seed) => (
                         <button
                           key={seed.hex}
@@ -404,7 +422,7 @@ export default function App() {
                             }));
                             setIsColorPickerOpen(false);
                           }}
-                          className={`w-9 h-9 rounded-full transition-transform hover:scale-110 flex items-center justify-center cursor-pointer ${
+                          className={`w-10 h-10 rounded-full transition-transform hover:scale-110 flex items-center justify-center cursor-pointer ${
                             themeState.seedHex.toUpperCase() === seed.hex.toUpperCase()
                               ? 'ring-2 ring-offset-2 ring-[var(--md-sys-color-on-surface)] ring-offset-[var(--md-sys-color-surface-container-high)] scale-105'
                               : ''
@@ -426,7 +444,7 @@ export default function App() {
                 setInfoModalTab('guide');
                 setIsInfoModalOpen(true);
               }}
-              className="p-2 rounded-2xl transition-all hover:bg-[var(--md-sys-color-surface-container-highest)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer flex items-center justify-center"
+              className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
               title="Waver Acoustic Guide & Offline Specs"
             >
               <MaterialSymbol name="help" className="text-lg" />
@@ -441,7 +459,7 @@ export default function App() {
                   mode: prev.mode === 'dark' ? 'light' : 'dark',
                 }));
               }}
-              className="p-2 rounded-2xl transition-all hover:bg-[var(--md-sys-color-surface-container-highest)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer flex items-center justify-center"
+              className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
               title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
             >
               <MaterialSymbol name={isDark ? 'light_mode' : 'dark_mode'} className="text-lg" />
@@ -451,55 +469,7 @@ export default function App() {
       </header>
 
       {/* Main Content Container */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-5 flex flex-col gap-5 relative z-10">
-        {/* Desktop Segmented Navigation Bar */}
-        <div className="hidden sm:flex justify-center">
-          <div className="m3-card p-1.5 inline-flex items-center gap-1.5 shadow-sm">
-            {(
-              [
-                { id: 'waver', label: 'Waver Acoustic Transceiver', icon: 'surround_sound' },
-                { id: 'chat', label: 'Sonic Chat', icon: 'forum', badge: unreadChatCount },
-                { id: 'qr', label: 'QR Studio', icon: 'qr_code_2' },
-                { id: 'base64', label: 'Base64 Studio', icon: 'data_object' },
-              ] as const
-            ).map((tab) => {
-              const isActive = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => {
-                    triggerHaptic('light', themeState.hapticsEnabled);
-                    setActiveTab(tab.id);
-                  }}
-                  className="relative flex items-center gap-2 px-5 py-2.5 rounded-2xl text-xs font-bold tracking-wide transition-all cursor-pointer"
-                  style={{
-                    background: isActive
-                      ? 'var(--md-sys-color-secondary-container)'
-                      : 'transparent',
-                    color: isActive
-                      ? 'var(--md-sys-color-on-secondary-container)'
-                      : 'var(--md-sys-color-on-surface-variant)',
-                  }}
-                >
-                  <MaterialSymbol name={tab.icon} filled={isActive} className="text-base" />
-                  <span>{tab.label}</span>
-                  {'badge' in tab && tab.badge ? (
-                    <span
-                      className="px-1.5 py-0.5 text-[10px] rounded-full font-extrabold"
-                      style={{
-                        background: 'var(--md-sys-color-primary)',
-                        color: 'var(--md-sys-color-on-primary)',
-                      }}
-                    >
-                      {tab.badge}
-                    </span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
+      <main className="flex-1 max-w-6xl w-full mx-auto px-3.5 sm:px-6 pt-2 pb-6 flex flex-col gap-5 relative z-10">
         {/* Collapsible Offline Cache & WebAssembly Storage Drawer */}
         <AnimatePresence>
           {isCacheDrawerOpen && (
@@ -509,30 +479,40 @@ export default function App() {
               exit={{ opacity: 0, height: 0 }}
               className="overflow-hidden"
             >
-              <div className="m3-card-xl p-4 sm:p-5 border border-[var(--md-sys-color-outline-variant)] space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2.5">
-                    <MaterialSymbol
-                      name="database"
-                      className="text-lg text-[var(--md-sys-color-primary)]"
-                    />
+              <div
+                className="p-5 sm:p-6 rounded-[32px] space-y-4"
+                style={{ background: 'var(--md-sys-color-surface-container)' }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-full flex items-center justify-center shrink-0"
+                      style={{
+                        background: 'var(--md-sys-color-primary-container)',
+                        color: 'var(--md-sys-color-on-primary-container)',
+                      }}
+                    >
+                      <MaterialSymbol name="database" className="text-lg" />
+                    </div>
                     <div>
-                      <h3 className="text-xs sm:text-sm font-bold text-[var(--md-sys-color-on-surface)]">
-                        Offline Memory & CacheStorage Vault (app-cache-v1)
+                      <h3 className="text-sm font-bold text-[var(--md-sys-color-on-surface)]">
+                        Offline Memory & CacheStorage Vault
                       </h3>
-                      <p className="text-[11px] text-[var(--md-sys-color-on-surface-variant)]">
-                        The ggwave WebAssembly binary and exported .WAV waveforms are persisted locally for 100% offline use.
+                      <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
+                        {wasmStatus.ready
+                          ? `ggwave WASM (${wasmStatus.wasmSizeKB} KB) compiled in ${wasmStatus.initTimeMs}ms & locked in CacheStorage`
+                          : 'Initializing ggwave WebAssembly in memory...'}
                       </p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={handleDownloadSingleFile}
-                      className="m3-btn-tonal px-3 py-1.5 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      className="m3-btn-tonal px-4 py-2 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
                     >
-                      <MaterialSymbol name="download" className="text-xs" />
-                      <span>Save Full Offline HTML</span>
+                      <MaterialSymbol name="download" className="text-sm" />
+                      <span>Save Standalone HTML</span>
                     </button>
                     {cachedFiles.length > 0 && (
                       <button
@@ -540,57 +520,59 @@ export default function App() {
                           await cacheStorageManager.clearCache();
                           refreshCachedFiles();
                         }}
-                        className="px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-400 hover:bg-rose-500/10 cursor-pointer"
+                        className="px-3.5 py-2 rounded-full text-xs font-semibold text-rose-400 hover:bg-rose-500/10 cursor-pointer"
                       >
-                        Clear User Files
+                        Clear Files
                       </button>
                     )}
+                    <button
+                      onClick={() => setIsCacheDrawerOpen(false)}
+                      className="p-2 rounded-full hover:bg-black/10 text-[var(--md-sys-color-on-surface-variant)] cursor-pointer"
+                    >
+                      <MaterialSymbol name="close" className="text-sm" />
+                    </button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                  {/* Pinned WASM Engine Cache Card */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   <div
-                    className="p-3 rounded-2xl border border-[var(--md-sys-color-primary)]/50 flex items-center justify-between gap-2"
-                    style={{ background: 'var(--md-sys-color-primary-container)' }}
+                    className="p-4 rounded-3xl flex items-center justify-between gap-3"
+                    style={{
+                      background: 'var(--md-sys-color-primary-container)',
+                      color: 'var(--md-sys-color-on-primary-container)',
+                    }}
                   >
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <MaterialSymbol
-                          name="memory"
-                          className="text-sm text-[var(--md-sys-color-on-primary-container)]"
-                        />
-                        <span className="text-xs font-bold text-[var(--md-sys-color-on-primary-container)] truncate">
-                          ggwave-waver-engine.wasm
-                        </span>
+                      <div className="text-xs font-bold truncate">
+                        ggwave-waver-engine.wasm
                       </div>
-                      <p className="text-[10px] font-mono opacity-80 text-[var(--md-sys-color-on-primary-container)] mt-0.5">
-                        {wasmStatus.wasmSizeKB} KB · Instant RAM + CacheStorage
+                      <p className="text-[11px] font-mono opacity-80 mt-0.5">
+                        {wasmStatus.wasmSizeKB} KB · 48kHz FSK + ECC
                       </p>
                     </div>
-                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-black/20 text-[var(--md-sys-color-on-primary-container)]">
-                      LOCKED
+                    <span className="text-[11px] font-bold opacity-90 shrink-0">
+                      Cached
                     </span>
                   </div>
 
                   {cachedFiles.map((file) => (
                     <div
                       key={file.url}
-                      className="p-3 rounded-2xl border border-[var(--md-sys-color-outline-variant)] flex items-center justify-between gap-2"
-                      style={{ background: 'var(--md-sys-color-surface-container)' }}
+                      className="p-4 rounded-3xl flex items-center justify-between gap-2"
+                      style={{ background: 'var(--md-sys-color-surface-container-high)' }}
                     >
                       <div className="min-w-0">
                         <div className="text-xs font-bold truncate text-[var(--md-sys-color-on-surface)]">
                           {file.name}
                         </div>
-                        <div className="text-[10px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
-                          {(file.size / 1024).toFixed(1)} KB · {file.type || 'binary'}
+                        <div className="text-[11px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
+                          {(file.size / 1024).toFixed(1)} KB
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button
                           onClick={() => cacheStorageManager.downloadCachedFile(file.url, file.name)}
-                          className="p-1.5 rounded-lg hover:bg-black/10 text-[var(--md-sys-color-primary)] cursor-pointer"
+                          className="p-2 rounded-full hover:bg-black/10 text-[var(--md-sys-color-primary)] cursor-pointer"
                           title="Download from Offline Cache"
                         >
                           <MaterialSymbol name="download" className="text-sm" />
@@ -600,7 +582,7 @@ export default function App() {
                             await cacheStorageManager.deleteCachedFile(file.url);
                             refreshCachedFiles();
                           }}
-                          className="p-1.5 rounded-lg hover:bg-black/10 text-rose-400 cursor-pointer"
+                          className="p-2 rounded-full hover:bg-black/10 text-rose-400 cursor-pointer"
                           title="Remove from Cache"
                         >
                           <MaterialSymbol name="delete" className="text-sm" />
@@ -634,27 +616,24 @@ export default function App() {
         )}
 
         {activeTab === 'qr' && (
-          <div className="max-w-3xl mx-auto w-full">
+          <div className="max-w-4xl mx-auto w-full">
             <QRUtilityNode />
           </div>
         )}
 
         {activeTab === 'base64' && (
-          <div className="max-w-3xl mx-auto w-full">
+          <div className="max-w-4xl mx-auto w-full">
             <Base64ToolNode />
           </div>
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="max-w-6xl w-full mx-auto px-4 py-6 border-t border-[var(--md-sys-color-outline-variant)]/40 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[var(--md-sys-color-on-surface-variant)]">
-        <div className="flex items-center gap-2">
-          <MaterialSymbol name="verified_user" className="text-sm text-[var(--md-sys-color-primary)]" />
-          <span>
-            Sound Link · Powered by Waver (ggwave WebAssembly) · 100% Offline Air-Gapped Audio Suite
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-4">
+      {/* Subtle Unboxed Footer (Desktop) */}
+      <footer className="hidden sm:flex max-w-6xl w-full mx-auto px-6 py-6 items-center justify-between gap-4 text-xs text-[var(--md-sys-color-on-surface-variant)]">
+        <span>
+          Sound Link · Waver ggwave WebAssembly · 100% Offline Air-Gapped Audio Suite
+        </span>
+        <div className="flex items-center gap-5">
           <button
             onClick={() => {
               setInfoModalTab('legal');
@@ -662,25 +641,25 @@ export default function App() {
             }}
             className="hover:text-[var(--md-sys-color-primary)] transition-colors cursor-pointer"
           >
-            Privacy & Legal Compliance
+            Privacy & Legal
           </button>
           <button
             onClick={handleDownloadSingleFile}
             className="hover:text-[var(--md-sys-color-primary)] font-semibold transition-colors cursor-pointer"
           >
-            Export Single-File Offline HTML
+            Export Offline HTML
           </button>
         </div>
       </footer>
 
-      {/* Android 16 Material You Expressive Mobile Bottom Navigation Bar */}
-      <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 m3-nav-bar px-2 py-2 pb-safe">
+      {/* Floating Expressive Pill Dock Navigation Bar (Mobile & Small Tablets) */}
+      <nav className="md:hidden fixed bottom-3 left-3 right-3 z-40 m3-nav-bar rounded-full px-2 py-1.5">
         <div className="grid grid-cols-5 gap-1 max-w-md mx-auto">
           {(
             [
-              { id: 'waver', label: 'Waver', icon: 'surround_sound' },
+              { id: 'waver', label: 'Acoustic', icon: 'surround_sound' },
               { id: 'chat', label: 'Chat', icon: 'forum', badge: unreadChatCount },
-              { id: 'qr', label: 'QR Studio', icon: 'qr_code_2' },
+              { id: 'qr', label: 'QR', icon: 'qr_code_2' },
               { id: 'base64', label: 'Base64', icon: 'data_object' },
               { id: 'theme', label: 'Theme', icon: 'palette' },
             ] as const
@@ -697,10 +676,10 @@ export default function App() {
                     setActiveTab(item.id);
                   }
                 }}
-                className="flex flex-col items-center justify-center py-1 rounded-2xl transition-all relative cursor-pointer"
+                className="flex flex-col items-center justify-center min-h-[48px] rounded-full transition-all relative cursor-pointer"
               >
                 <div
-                  className={`w-14 h-8 rounded-full flex items-center justify-center transition-all duration-300 ${
+                  className={`w-12 h-7 rounded-full flex items-center justify-center transition-all duration-200 ${
                     isActive ? 'scale-105' : 'opacity-75'
                   }`}
                   style={{
@@ -712,10 +691,10 @@ export default function App() {
                       : 'var(--md-sys-color-on-surface-variant)',
                   }}
                 >
-                  <MaterialSymbol name={item.icon} filled={isActive} className="text-lg" />
+                  <MaterialSymbol name={item.icon} filled={isActive} className="text-base" />
                 </div>
                 <span
-                  className={`text-[10px] mt-1 tracking-tight ${
+                  className={`text-[10px] mt-0.5 tracking-tight whitespace-nowrap ${
                     isActive
                       ? 'font-extrabold text-[var(--md-sys-color-on-surface)]'
                       : 'font-medium text-[var(--md-sys-color-on-surface-variant)]'
@@ -725,7 +704,7 @@ export default function App() {
                 </span>
                 {'badge' in item && item.badge ? (
                   <span
-                    className="absolute top-0.5 right-3 w-4 h-4 rounded-full text-[9px] font-bold flex items-center justify-center"
+                    className="absolute top-0.5 right-2.5 w-4 h-4 rounded-full text-[9px] font-bold flex items-center justify-center"
                     style={{
                       background: 'var(--md-sys-color-primary)',
                       color: 'var(--md-sys-color-on-primary)',

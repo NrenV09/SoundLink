@@ -1,22 +1,23 @@
 import React, { useState, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { motion } from 'motion/react';
-import { Type, Maximize2, RefreshCw, Copy, Check, Eye, Download, X, GripHorizontal } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { RefreshCw, Copy, Check, Download, X } from 'lucide-react';
 
 export const QRUtilityNode: React.FC = () => {
-  const [data, setData] = useState("https://nexus.p2p");
+  const [data, setData] = useState('https://soundlink.offline');
   const [copied, setCopied] = useState(false);
   const [size, setSize] = useState(256);
   const qrRef = useRef<SVGSVGElement>(null);
-  const [preview, setPreview] = useState<{ url: string; type: string; filename: string } | null>(null);
+  const [preview, setPreview] = useState<{ url: string; type: string; filename: string } | null>(
+    null
+  );
 
   const generatePreview = (type: 'png' | 'svg') => {
     const svg = qrRef.current;
     if (!svg) return;
 
     const svgData = new XMLSerializer().serializeToString(svg);
-    const fileName = `nexus_qr_${Date.now()}.${type}`;
+    const fileName = `soundlink_qr_${Date.now()}.${type}`;
 
     if (type === 'svg') {
       const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
@@ -48,161 +49,171 @@ export const QRUtilityNode: React.FC = () => {
   };
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="grid grid-cols-12 gap-6 h-full overflow-y-auto pb-20 lg:pb-0 relative"
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="grid grid-cols-1 lg:grid-cols-12 gap-6 relative"
     >
-      <div className="col-span-12 lg:col-span-5 flex flex-col gap-5">
-        {/* Source Data Input */}
-        <div className="m3-card p-6 flex flex-col">
-          <div className="flex items-center gap-3 mb-4 text-text">
-            <div className="w-9 h-9 rounded-2xl bg-[var(--md-sys-color-primary-container)] text-[var(--md-sys-color-on-primary-container)] flex items-center justify-center">
-              <Type className="w-4 h-4" />
-            </div>
+      {/* Left Column: Input & Export Controls */}
+      <div
+        className="lg:col-span-6 rounded-[32px] p-5 sm:p-6 flex flex-col justify-between gap-5"
+        style={{ background: 'var(--md-sys-color-surface-container-low)' }}
+      >
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-bold">Enter Link or Text</h3>
-              <p className="text-xs text-muted">Type any website URL, Wi-Fi password, or note</p>
+              <h3 className="text-base sm:text-lg font-extrabold text-[var(--md-sys-color-on-surface)]">
+                Optical QR Studio
+              </h3>
+              <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
+                Encode links, keys, or offline notes into high-density QR codes
+              </p>
             </div>
+            {data.length > 0 && (
+              <button
+                onClick={() => setData('')}
+                className="px-3.5 py-1.5 rounded-full text-xs font-bold text-rose-400 hover:bg-rose-500/10 flex items-center gap-1 cursor-pointer"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Clear</span>
+              </button>
+            )}
           </div>
-          
-          <textarea 
-            value={data}
-            onChange={(e) => setData(e.target.value)}
-            placeholder="Type or paste a website link or text here..."
-            className="w-full m3-surface-low border border-[var(--md-sys-color-outline-variant)] text-text p-4 rounded-2xl min-h-[120px] outline-none focus:border-[var(--md-sys-color-primary)] resize-none placeholder:text-muted/60 mb-3 text-sm leading-relaxed transition-colors"
-          />
 
-          <div className="flex justify-between items-center m3-surface-low px-4 py-2.5 rounded-full border border-[var(--md-sys-color-outline-variant)]">
-            <span className="text-xs text-muted font-mono tabular-nums">{data.length} characters</span>
-            <button 
-              onClick={() => setData("")}
-              className="text-xs text-red-600 dark:text-red-400 hover:bg-red-500/15 transition-colors flex items-center gap-1 font-semibold bg-red-500/10 border border-red-500/20 px-3 py-1 rounded-full cursor-pointer active:scale-95"
-            >
-              <RefreshCw className="w-3 h-3" /> Clear
-            </button>
+          <div
+            className="rounded-[24px] p-4 space-y-2"
+            style={{ background: 'var(--md-sys-color-surface-container-lowest)' }}
+          >
+            <textarea
+              value={data}
+              onChange={(e) => setData(e.target.value)}
+              placeholder="Type or paste a link, Wi-Fi credential, or note..."
+              rows={4}
+              className="w-full bg-transparent text-sm leading-relaxed resize-none focus:outline-none"
+              style={{ color: 'var(--md-sys-color-on-surface)' }}
+            />
+            <div className="text-right text-[11px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
+              {data.length} characters
+            </div>
           </div>
         </div>
 
-        {/* Config Panel */}
-        <div className="m3-card p-6 flex-1 flex flex-col">
-          <div className="flex items-center gap-3 mb-5 text-text">
-            <div className="w-9 h-9 rounded-2xl bg-[var(--md-sys-color-secondary-container)] text-[var(--md-sys-color-on-secondary-container)] flex items-center justify-center">
-              <Maximize2 className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold">Save or Copy QR Code</h3>
-              <p className="text-xs text-muted">Adjust image size and download</p>
-            </div>
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 px-1">
+            <span className="text-xs font-medium text-[var(--md-sys-color-on-surface-variant)] whitespace-nowrap">
+              Resolution
+            </span>
+            <input
+              type="range"
+              min="128"
+              max="1024"
+              step="32"
+              value={size}
+              onChange={(e) => setSize(parseInt(e.target.value, 10))}
+              className="flex-1 accent-[var(--md-sys-color-primary)] h-1.5 rounded-full cursor-pointer"
+            />
+            <span className="text-xs font-mono font-bold text-[var(--md-sys-color-primary)] whitespace-nowrap">
+              {size}px
+            </span>
           </div>
 
-          <div className="space-y-6">
-            <div>
-              <div className="flex justify-between text-xs font-medium text-muted mb-2.5">
-                <span>Image Size</span>
-                <span className="text-[var(--md-sys-color-primary)] font-mono font-bold tabular-nums">{size} × {size} px</span>
-              </div>
-              <input 
-                type="range"
-                min="128"
-                max="1024"
-                step="32"
-                value={size}
-                onChange={(e) => setSize(parseInt(e.target.value))}
-                className="w-full accent-[var(--md-sys-color-primary)] m3-surface-high h-2 rounded-full cursor-pointer"
-              />
-            </div>
-
-            <div className="grid grid-cols-3 gap-2.5">
-              <button 
-                onClick={copyToClipboard}
-                className="flex flex-col items-center justify-center gap-1.5 py-3.5 px-2 rounded-2xl m3-btn-tonal transition-all text-xs font-semibold cursor-pointer active:scale-95"
-              >
-                {copied ? <Check className="w-4 h-4 text-success" /> : <Copy className="w-4 h-4" />}
-                <span>{copied ? "Copied!" : "Copy Text"}</span>
-              </button>
-              <button 
-                onClick={() => generatePreview('png')}
-                className="flex flex-col items-center justify-center gap-1.5 py-3.5 px-2 rounded-2xl m3-btn-filled transition-all text-xs font-semibold cursor-pointer shadow-2xs active:scale-95"
-              >
-                <Download className="w-4 h-4" />
-                <span>Save PNG</span>
-              </button>
-              <button 
-                onClick={() => generatePreview('svg')}
-                className="flex flex-col items-center justify-center gap-1.5 py-3.5 px-2 rounded-2xl m3-btn-tertiary transition-all text-xs font-semibold cursor-pointer active:scale-95"
-              >
-                <Download className="w-4 h-4" />
-                <span>Save SVG</span>
-              </button>
-            </div>
+          <div className="grid grid-cols-3 gap-2.5">
+            <button
+              onClick={copyToClipboard}
+              className="min-h-[48px] py-3 px-3 rounded-full m3-btn-tonal flex items-center justify-center gap-1.5 text-xs font-bold cursor-pointer active:scale-95 whitespace-nowrap"
+            >
+              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              <span>{copied ? 'Copied' : 'Copy'}</span>
+            </button>
+            <button
+              onClick={() => generatePreview('png')}
+              className="min-h-[48px] py-3 px-3 rounded-full m3-btn-filled flex items-center justify-center gap-1.5 text-xs font-bold cursor-pointer active:scale-95 whitespace-nowrap"
+            >
+              <Download className="w-4 h-4" />
+              <span>PNG</span>
+            </button>
+            <button
+              onClick={() => generatePreview('svg')}
+              className="min-h-[48px] py-3 px-3 rounded-full m3-btn-tertiary flex items-center justify-center gap-1.5 text-xs font-bold cursor-pointer active:scale-95 whitespace-nowrap"
+            >
+              <Download className="w-4 h-4" />
+              <span>SVG</span>
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Viewport */}
-      <div className="col-span-12 lg:col-span-7 m3-card relative flex items-center justify-center overflow-hidden p-8 sm:p-12 min-h-[380px]">
-        <div className="absolute top-4 left-4 text-xs text-muted flex items-center gap-2 font-semibold m3-surface-high px-3.5 py-1.5 rounded-full border border-[var(--md-sys-color-outline-variant)]">
-          <div className="h-2 w-2 rounded-full bg-success" />
-          QR Code Preview
-        </div>
-
-        <div className="bg-white p-5 sm:p-6 rounded-[24px] relative shadow-md border border-[var(--md-sys-color-outline-variant)] w-fit max-w-full flex items-center justify-center aspect-square mx-auto">
-          <QRCodeSVG 
+      {/* Right Column: Clean Unboxed QR Stage */}
+      <div
+        className="lg:col-span-6 rounded-[32px] p-8 flex flex-col items-center justify-center min-h-[340px]"
+        style={{ background: 'var(--md-sys-color-surface-container-low)' }}
+      >
+        <div className="bg-white p-6 rounded-[28px] shadow-lg w-fit max-w-full flex items-center justify-center aspect-square">
+          <QRCodeSVG
             ref={qrRef}
-            value={data || " "}
-            size={size}
+            value={data || ' '}
+            size={Math.min(size, 240)}
             level="H"
             bgColor="#ffffff"
             fgColor="#111827"
             includeMargin={false}
-            style={{ width: '100%', height: '100%', maxWidth: `${size}px`, maxHeight: `${size}px` }}
           />
         </div>
       </div>
 
-      {/* Preview Overlay */}
+      {/* Preview Modal Overlay */}
       {preview && (
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="absolute inset-0 z-50 m3-card-xl flex flex-col p-5 sm:p-8 shadow-2xl overflow-y-auto"
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
         >
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 sm:gap-0 mb-6 border-b border-[var(--md-sys-color-outline-variant)] pb-4">
-            <div className="flex flex-col">
-              <h2 className="text-lg sm:text-xl font-bold text-text">Download QR Code Image</h2>
-              <p className="text-xs text-muted mt-0.5">
-                Format: {preview.type.toUpperCase()} ({size} × {size} px)
-              </p>
-            </div>
-
-            <div className="flex flex-wrap sm:flex-nowrap gap-2.5 w-full sm:w-auto">
-              <a 
-                href={preview.url} 
-                download={preview.filename}
-                className="flex-1 sm:flex-none justify-center flex items-center gap-2 py-2.5 px-5 rounded-full m3-btn-filled font-semibold text-xs transition-all shadow-2xs"
-              >
-                <Download className="w-4 h-4" /> Save Image
-              </a>
-              <button 
+          <div
+            className="w-full max-w-lg rounded-[32px] p-6 space-y-5 shadow-2xl"
+            style={{ background: 'var(--md-sys-color-surface-container-high)' }}
+          >
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-extrabold text-[var(--md-sys-color-on-surface)]">
+                  Export QR Image
+                </h2>
+                <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
+                  {preview.type.toUpperCase()} · {size} × {size} px
+                </p>
+              </div>
+              <button
                 onClick={() => setPreview(null)}
-                className="flex-1 sm:flex-none justify-center flex items-center gap-2 py-2.5 px-5 rounded-full m3-btn-tonal font-semibold text-xs transition-all cursor-pointer"
+                className="p-2 rounded-full hover:bg-black/10 cursor-pointer"
               >
-                <X className="w-4 h-4" /> Back
+                <X className="w-5 h-5" />
               </button>
             </div>
-          </div>
 
-          <div className="flex-1 border border-[var(--md-sys-color-outline-variant)] m3-surface-low rounded-2xl flex items-center justify-center relative overflow-hidden group p-6">
-            <img 
-              src={preview.url} 
-              alt="QR Preview" 
-              draggable={true}
-              onDragStart={(e) => {
-                e.dataTransfer.setData("DownloadURL", `image/${preview.type}:${preview.filename}:${preview.url}`);
-              }}
-              className="max-w-full max-h-full object-contain cursor-grab active:cursor-grabbing rounded-2xl bg-white p-4 shadow-md border border-[var(--md-sys-color-outline-variant)]"
-            />
+            <div className="p-6 rounded-[24px] flex items-center justify-center bg-black/20">
+              <img
+                src={preview.url}
+                alt="QR Preview"
+                referrerPolicy="no-referrer"
+                className="max-w-[240px] max-h-[240px] object-contain rounded-2xl bg-white p-4 shadow-md"
+              />
+            </div>
+
+            <div className="flex items-center gap-3">
+              <a
+                href={preview.url}
+                download={preview.filename}
+                className="flex-1 min-h-[48px] rounded-full m3-btn-filled font-bold text-xs flex items-center justify-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download {preview.type.toUpperCase()}</span>
+              </a>
+              <button
+                onClick={() => setPreview(null)}
+                className="min-h-[48px] px-6 rounded-full m3-btn-tonal font-bold text-xs cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </motion.div>
       )}

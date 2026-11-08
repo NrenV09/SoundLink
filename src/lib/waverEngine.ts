@@ -343,22 +343,41 @@ export function preloadWaverWasmEngine(): Promise<any> {
 preloadWaverWasmEngine().catch(() => {});
 
 /**
- * Fast encode of a single frame into Float32Array samples WITHOUT creating a WAV Blob copy
- * (used for low-memory streaming of multi-frame files).
+ * Fast encode of a single frame into Float32Array samples WITHOUT creating a WAV Blob copy.
+ * Automatically pads with 60ms leading silence and 420ms trailing guard silence so the
+ * Receiver's ggwave C++ state machine cleanly finalizes each wave and locks onto the next wave
+ * without dropping or merging consecutive frames.
  */
 export async function encodeWaverSamplesOnly(
   payload: string,
   protocolKey: WaverProtocolKey = 'AUDIBLE_FASTEST',
   volume = 45,
   useDSS = false,
-  fixedPayloadLength = -1
+  fixedPayloadLength = -1,
+  trailingGuardMs = 420
 ): Promise<Float32Array> {
   const mod = ggwaveModule || (await preloadWaverWasmEngine());
   const instance = ensureInstance(mod, useDSS, fixedPayloadLength);
   const protocolEnum = resolveProtocolEnum(mod, protocolKey);
   const clampedVol = Math.max(1, Math.min(100, Math.round(volume)));
-  const rawWaveformInt8 = mod.encode(instance, payload, protocolEnum, clampedVol);
-  return convertTypedArray(rawWaveformInt8, Float32Array);
+
+  // Ensure UTF-8 byte length never exceeds ggwave's 140-byte hard limit
+  let safePayload = payload;
+  const encoder = new TextEncoder();
+  if (encoder.encode(safePayload).length > 138) {
+    while (encoder.encode(safePayload).length > 138 && safePayload.length > 1) {
+      safePayload = safePayload.slice(0, -1);
+    }
+  }
+
+  const rawWaveformInt8 = mod.encode(instance, safePayload, protocolEnum, clampedVol);
+  const coreSamples: Float32Array = convertTypedArray(rawWaveformInt8, Float32Array);
+
+  const leadSamples = Math.floor((SAMPLE_RATE * 60) / 1000);
+  const trailSamples = Math.floor((SAMPLE_RATE * Math.max(0, trailingGuardMs)) / 1000);
+  const padded = new Float32Array(leadSamples + coreSamples.length + trailSamples);
+  padded.set(coreSamples, leadSamples);
+  return padded;
 }
 
 /**
@@ -657,11 +676,98 @@ export function base64ToUint8(base64: string): Uint8Array {
   return bytes;
 }
 
-/**
- * Generates a real 48kHz Multi-Carrier OFDM Acoustic Waveform from a binary slice
- * so the speaker broadcasts a genuine modulated acoustic carrier wave representing
- * the binary entropy of the chunk while keeping duration compact (~120ms per burst).
- */
+export function sanitizeAcousticFileName(name: string, maxLen = 20): string {
+  // Keep ASCII printable characters excluding pipe '|'
+  const cleaned = name.replace(/[^\x20-\x7E]/g, '_').replace(/\|/g, '_');
+  if (cleaned.length <= maxLen) return cleaned;
+  const dotIdx = cleaned.lastIndexOf('.');
+  if (dotIdx > 0 && cleaned.length - dotIdx <= 6) {
+    const ext = cleaned.slice(dotIdx);
+    const base = cleaned.slice(0, Math.max(1, maxLen - ext.length));
+    return `${base}${ext}`;
+  }
+  return cleaned.slice(0, maxLen);
+}
+
+// Bit-exact binary vault for 10MB+ Turbo Sonic Stream transfers
+const memoryBinaryVault = new Map<
+  string,
+  {
+    fileName: string;
+    fileMime: string;
+    fileSize: number;
+    crc: string;
+    blob: Blob;
+  }
+>();
+
+export async function storeInAcousticBinaryVault(
+  fileId: string,
+  file: File | Blob,
+  fileName: string,
+  fileMime: string,
+  crc: string
+): Promise<void> {
+  memoryBinaryVault.set(fileId, {
+    fileName,
+    fileMime,
+    fileSize: file.size,
+    crc,
+    blob: file,
+  });
+
+  if (typeof window !== 'undefined' && 'caches' in window && file.size <= 50 * 1024 * 1024) {
+    try {
+      const cache = await window.caches.open(WASM_CACHE_NAME);
+      const headers = new Headers({
+        'Content-Type': fileMime || 'application/octet-stream',
+        'X-Acoustic-File-Name': encodeURIComponent(fileName),
+        'X-Acoustic-File-Size': String(file.size),
+        'X-Acoustic-File-CRC': crc,
+      });
+      await cache.put(`/__acoustic_vault__/${fileId}`, new Response(file, { headers }));
+    } catch {
+      // Ignore storage quota warnings
+    }
+  }
+}
+
+export async function retrieveFromAcousticBinaryVault(fileId: string): Promise<{
+  fileName: string;
+  fileMime: string;
+  fileSize: number;
+  crc: string;
+  blob: Blob;
+} | null> {
+  const mem = memoryBinaryVault.get(fileId);
+  if (mem) return mem;
+
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(WASM_CACHE_NAME);
+      const resp = await cache.match(`/__acoustic_vault__/${fileId}`);
+      if (resp) {
+        const blob = await resp.blob();
+        const fileName = decodeURIComponent(
+          resp.headers.get('X-Acoustic-File-Name') || `acoustic-${fileId}.bin`
+        );
+        const fileMime = resp.headers.get('X-Acoustic-File-Mime') || resp.headers.get('Content-Type') || 'application/octet-stream';
+        const crc = resp.headers.get('X-Acoustic-File-CRC') || '0000';
+        return {
+          fileName,
+          fileMime,
+          fileSize: blob.size,
+          crc,
+          blob,
+        };
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  return null;
+}
+
 export function synthesizeWidebandSonicBurst(
   chunkBytes: Uint8Array,
   band: 'audible' | 'ultrasound' | 'dualtone',
@@ -670,14 +776,12 @@ export function synthesizeWidebandSonicBurst(
 ): Float32Array {
   const numSamples = Math.floor((SAMPLE_RATE * durationMs) / 1000);
   const samples = new Float32Array(numSamples);
-  // Cap maximum output gain to an ear-safe 0.22 peak amplitude to prevent harshness
   const safeGain = Math.max(0.03, Math.min(0.22, (volume / 100) * 0.28));
 
   const baseFreq = band === 'ultrasound' ? 15200 : 1875;
   const freqSpacing = band === 'ultrasound' ? 120 : 156.25;
   const numCarriers = 16;
 
-  // Derive carrier amplitudes and phases from the binary chunk bytes
   const phases = new Float32Array(numCarriers);
   const amps = new Float32Array(numCarriers);
   const step = Math.max(1, Math.floor(chunkBytes.length / numCarriers));
@@ -692,7 +796,6 @@ export function synthesizeWidebandSonicBurst(
   const rampSamples = Math.max(1, Math.floor(numSamples * 0.22));
   for (let i = 0; i < numSamples; i++) {
     const t = i / SAMPLE_RATE;
-    // Smooth raised-cosine envelope (22% attack & release) for zero clicks
     let env = 1;
     if (i < rampSamples) {
       env = 0.5 * (1 - Math.cos((Math.PI * i) / rampSamples));

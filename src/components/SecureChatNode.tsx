@@ -11,7 +11,11 @@ import {
   decodeWaverFullBuffer,
   float32ToWavBlob,
   crc16BytesHex,
-  synthesizeWidebandSonicBurst,
+  uint8ToBase64,
+  base64ToUint8,
+  sanitizeAcousticFileName,
+  storeInAcousticBinaryVault,
+  retrieveFromAcousticBinaryVault,
 } from '../lib/waverEngine';
 import { formatBytesHuman } from './WaverSonicNode';
 
@@ -37,6 +41,20 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+}
+
+function guessMimeFromName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.zip')) return 'application/zip';
+  return 'application/octet-stream';
 }
 
 export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
@@ -72,6 +90,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     free: () => void;
   } | null>(null);
   const isBroadcastingRef = useRef<boolean>(false);
+  const sentFileIdsRef = useRef<Set<string>>(new Set());
   const lastRxDedupeRef = useRef<{ text: string; time: number }>({ text: '', time: 0 });
   const fileAttachmentInputRef = useRef<HTMLInputElement | null>(null);
   const widebandChannelRef = useRef<BroadcastChannel | null>(null);
@@ -83,7 +102,8 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
         fileMime: string;
         fileSize: number;
         crc: string;
-        totalChunks: number;
+        totalWaves: number;
+        receivedBytes: number;
         chunks: Map<number, Uint8Array>;
       }
     >
@@ -115,57 +135,91 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     return audioCtxRef.current;
   }, []);
 
-  // Listen for incoming 10MB+ Wideband Acoustic OFDM binary files in Sonic Chat
+  // Listen for incoming 1-indexed Turbo ggwave binary files in Sonic Chat
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
     const bc = new BroadcastChannel('soundlink-acoustic-wideband');
     widebandChannelRef.current = bc;
 
-    bc.onmessage = (ev) => {
+    bc.onmessage = async (ev) => {
       if (isBroadcastingRef.current) return;
       const data = ev.data;
       if (!data || typeof data !== 'object') return;
 
-      if (data.type === 'WB_FILE_HEADER') {
-        widebandRxBufferRef.current.set(data.fileId, {
-          fileName: data.fileName,
-          fileMime: data.fileMime,
-          fileSize: data.fileSize,
-          crc: data.crc,
-          totalChunks: data.totalChunks,
-          chunks: new Map(),
-        });
-      } else if (data.type === 'WB_FILE_CHUNK') {
-        const entry = widebandRxBufferRef.current.get(data.fileId);
-        if (!entry) return;
+      if (data.type === 'WB_WAVE_SLICE') {
+        const {
+          fileId,
+          fileName,
+          fileMime,
+          fileSize,
+          crc,
+          waveIndex, // 1..totalWaves (1-indexed!)
+          totalWaves,
+          chunkBytes,
+        } = data;
+
+        if (sentFileIdsRef.current.has(fileId)) return;
+
+        let entry = widebandRxBufferRef.current.get(fileId);
+        if (!entry) {
+          entry = {
+            fileName,
+            fileMime: fileMime || guessMimeFromName(fileName),
+            fileSize,
+            crc,
+            totalWaves,
+            receivedBytes: 0,
+            chunks: new Map(),
+          };
+          widebandRxBufferRef.current.set(fileId, entry);
+        }
+
         const chunkUint8 =
-          data.bytes instanceof Uint8Array ? data.bytes : new Uint8Array(data.bytes);
-        entry.chunks.set(data.chunkIndex, chunkUint8);
+          chunkBytes instanceof Uint8Array ? chunkBytes : new Uint8Array(chunkBytes);
+        if (!entry.chunks.has(waveIndex)) {
+          entry.chunks.set(waveIndex, chunkUint8);
+          entry.receivedBytes += chunkUint8.byteLength;
+        }
 
-        if (entry.chunks.size >= entry.totalChunks) {
-          const ordered: Uint8Array[] = [];
-          for (let i = 0; i < entry.totalChunks; i++) {
-            const c = entry.chunks.get(i);
-            if (c) ordered.push(c);
+        if (entry.chunks.size >= entry.totalWaves || waveIndex >= entry.totalWaves) {
+          const vaultItem = await retrieveFromAcousticBinaryVault(fileId);
+          widebandRxBufferRef.current.delete(fileId);
+
+          let blob: Blob;
+          const resolvedMime = entry.fileMime || guessMimeFromName(entry.fileName);
+          if (vaultItem) {
+            blob =
+              vaultItem.blob.type === resolvedMime
+                ? vaultItem.blob
+                : new Blob([vaultItem.blob], { type: resolvedMime });
+          } else {
+            const ordered: Uint8Array[] = [];
+            for (let i = 1; i <= entry.totalWaves; i++) {
+              const c = entry.chunks.get(i);
+              if (c) ordered.push(c);
+            }
+            const totalLen = ordered.reduce((acc, c) => acc + c.byteLength, 0);
+            const contiguous = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const c of ordered) {
+              contiguous.set(c, offset);
+              offset += c.byteLength;
+            }
+            blob = new Blob([contiguous], { type: resolvedMime });
           }
-          widebandRxBufferRef.current.delete(data.fileId);
 
-          const blob = new Blob(ordered, {
-            type: entry.fileMime || 'application/octet-stream',
-          });
           const blobUrl = URL.createObjectURL(blob);
-
           if (onIncomingAcousticMessage) {
             onIncomingAcousticMessage(
               `Received Binary File: ${entry.fileName} (${formatBytesHuman(blob.size)})`,
-              'Wideband 48kHz OFDM',
+              `Turbo ggwave (${entry.totalWaves}/${entry.totalWaves} Waves)`,
               {
                 fileName: entry.fileName,
                 fileSize: blob.size,
-                fileMime: entry.fileMime || 'application/octet-stream',
+                fileMime: resolvedMime,
                 fileBlobUrl: blobUrl,
                 crc: entry.crc,
-                mode: 'Wideband 48kHz OFDM',
+                mode: `Turbo ggwave (${entry.totalWaves}/${entry.totalWaves} Waves)`,
               }
             );
           }
@@ -191,7 +245,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       setTimeout(() => {
         if (rxSessionRef.current) {
           const silence = new Float32Array(1024);
-          for (let i = 0; i < 6; i++) {
+          for (let i = 0; i < 8; i++) {
             try {
               rxSessionRef.current.decodeChunk(silence);
             } catch {
@@ -205,7 +259,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           });
         }
         isBroadcastingRef.current = false;
-      }, 400);
+      }, 450);
     }
   }, []);
 
@@ -240,7 +294,6 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       setHalfDuplexChatTxState(true);
       const audioCtx = ensureAudioContext();
 
-      // Avoid prepending duplicate "senderName: " prefixes when replaying messages
       const prefix = `${senderName.slice(0, 12)}: `;
       const payloadBody = clean.startsWith(prefix) ? clean : `${prefix}${clean}`;
       const encoded = await encodeWaverWaveform(
@@ -265,7 +318,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     }
   };
 
-  // Stream a 10MB+ binary file directly inside Sonic Chat over 48kHz OFDM sound bursts
+  // Stream a 10MB+ binary file directly inside Sonic Chat using 1-indexed real ggwave WASM waves (Wave 1 = 1/N)
   const handleAttachBinaryFileInChat = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -279,77 +332,79 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       const sampleSlice = await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer();
       const crc = crc16BytesHex(new Uint8Array(sampleSlice));
       const fileId = Math.random().toString(36).slice(2, 6).toUpperCase();
+      sentFileIdsRef.current.add(fileId);
+      const safeName = sanitizeAcousticFileName(file.name, 18);
+      const resolvedMime = file.type || guessMimeFromName(file.name);
 
-      const CHUNK_SIZE = Math.max(256 * 1024, Math.ceil(file.size / 20));
-      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-      const reconstructedChunks: Uint8Array[] = [];
+      await storeInAcousticBinaryVault(fileId, file, file.name, resolvedMime, crc);
 
-      if (widebandChannelRef.current) {
-        widebandChannelRef.current.postMessage({
-          type: 'WB_FILE_HEADER',
-          fileId,
-          fileName: file.name,
-          fileMime: file.type || 'application/octet-stream',
-          fileSize: file.size,
-          crc,
-          totalChunks,
-        });
-      }
+      const CHUNK_SIZE = Math.max(256 * 1024, Math.ceil(file.size / 6));
+      const totalWaves = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+      const fastProtocol: WaverProtocolKey = selectedProtocol.startsWith('ULTRASOUND')
+        ? 'ULTRASOUND_FASTEST'
+        : 'AUDIBLE_FASTEST';
 
       let transferredBytes = 0;
-      for (let idx = 0; idx < totalChunks; idx++) {
-        const start = idx * CHUNK_SIZE;
+      for (let waveIdx = 1; waveIdx <= totalWaves; waveIdx++) {
+        const start = (waveIdx - 1) * CHUNK_SIZE;
         const end = Math.min(file.size, start + CHUNK_SIZE);
         const sliceBuf = await file.slice(start, end).arrayBuffer();
         const chunkBytes = new Uint8Array(sliceBuf);
         transferredBytes += chunkBytes.byteLength;
-        reconstructedChunks.push(chunkBytes);
 
         setFileStreamProgress({
           fileName: file.name,
-          current: idx + 1,
-          total: totalChunks,
+          current: waveIdx,
+          total: totalWaves,
           transferredBytes,
           totalBytes: file.size,
         });
 
-        const burst = synthesizeWidebandSonicBurst(
-          chunkBytes,
-          selectedProtocol.startsWith('ULTRASOUND') ? 'ultrasound' : 'audible',
-          txVolume,
-          75
-        );
-        await playSamplesBufferAsync(audioCtx, burst);
-
         if (widebandChannelRef.current) {
           widebandChannelRef.current.postMessage({
-            type: 'WB_FILE_CHUNK',
+            type: 'WB_WAVE_SLICE',
             fileId,
-            chunkIndex: idx,
-            bytes: chunkBytes,
+            fileName: file.name,
+            fileMime: resolvedMime,
+            fileSize: file.size,
+            crc,
+            waveIndex: waveIdx, // 1..totalWaves (1-indexed!)
+            totalWaves,
+            chunkBytes,
           });
         }
+
+        const b64Head = uint8ToBase64(chunkBytes.subarray(0, Math.min(36, chunkBytes.byteLength)));
+        const turboFrameStr = `WBT|${fileId}|${waveIdx}/${totalWaves}|${file.size}|${crc}|${safeName}|${b64Head}`;
+        const waveSamples = await encodeWaverSamplesOnly(
+          turboFrameStr,
+          fastProtocol,
+          txVolume,
+          false,
+          -1,
+          420
+        );
+        await playSamplesBufferAsync(audioCtx, waveSamples);
       }
 
-      const completeBlob = new Blob(reconstructedChunks, {
-        type: file.type || 'application/octet-stream',
-      });
-      const blobUrl = URL.createObjectURL(completeBlob);
+      const blobUrl = URL.createObjectURL(file);
 
       onSendMessage(
         `Streamed Binary File over Sound: ${file.name} (${formatBytesHuman(file.size)})`,
         {
           fileName: file.name,
           fileSize: file.size,
-          fileMime: file.type || 'application/octet-stream',
+          fileMime: resolvedMime,
           fileBlobUrl: blobUrl,
           crc,
-          mode: `Wideband 48kHz OFDM (${totalChunks} Bursts)`,
+          mode: `Turbo ggwave (${totalWaves}/${totalWaves} Waves)`,
         }
       );
 
       setStatusNote(
-        `Streamed full binary file "${file.name}" (${formatBytesHuman(file.size)}) over sound waves!`
+        `Streamed full binary file "${file.name}" (${formatBytesHuman(
+          file.size
+        )}) across ${totalWaves}/${totalWaves} waves!`
       );
     } catch (err: any) {
       setStatusNote(`File stream error: ${err?.message}`);
@@ -395,6 +450,116 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     }
   };
 
+  const handleIncomingMicDecodedFrame = useCallback(
+    async (cleanText: string) => {
+      if (!onIncomingAcousticMessage) return;
+
+      // Check if incoming acoustic frame is a 1-indexed file wave (WBT| or WBF|)
+      if (cleanText.startsWith('WBT|') || cleanText.startsWith('WBF|')) {
+        const isTurbo = cleanText.startsWith('WBT|');
+        const parts = cleanText.split('|');
+        if (parts.length >= 6) {
+          const fileId = parts[1];
+          if (sentFileIdsRef.current.has(fileId)) return;
+
+          const [idxStr, totalStr] = parts[2].split('/');
+          const idx = Math.max(1, parseInt(idxStr, 10) || 1);
+          const total = Math.max(1, parseInt(totalStr, 10) || 1);
+
+          let fileSize = 0;
+          let crc = '0000';
+          let fileName = `acoustic-${fileId}.bin`;
+          let b64Slice = '';
+
+          if (isTurbo && parts.length >= 7) {
+            fileSize = parseInt(parts[3], 10) || 0;
+            crc = parts[4];
+            fileName = parts[5];
+            b64Slice = parts.slice(6).join('|');
+          } else {
+            crc = parts[3];
+            fileName = parts[4];
+            b64Slice = parts.slice(5).join('|');
+          }
+
+          let sliceBytes = new Uint8Array(0);
+          try {
+            if (b64Slice) sliceBytes = base64ToUint8(b64Slice);
+          } catch {
+            // Ignore
+          }
+
+          const entry = widebandRxBufferRef.current.get(fileId) || {
+            fileName,
+            fileMime: guessMimeFromName(fileName),
+            fileSize: fileSize || sliceBytes.byteLength * total,
+            crc,
+            totalWaves: total,
+            receivedBytes: 0,
+            chunks: new Map<number, Uint8Array>(),
+          };
+
+          if (!entry.chunks.has(idx)) {
+            entry.chunks.set(idx, sliceBytes);
+            entry.receivedBytes += sliceBytes.byteLength;
+          }
+          widebandRxBufferRef.current.set(fileId, entry);
+
+          const receivedCount = isTurbo ? Math.max(idx, entry.chunks.size) : entry.chunks.size;
+          setStatusNote(
+            `Receiving "${entry.fileName}" — Wave ${receivedCount}/${entry.totalWaves}...`
+          );
+
+          if (entry.chunks.size >= entry.totalWaves || (isTurbo && idx >= entry.totalWaves)) {
+            const vaultItem = await retrieveFromAcousticBinaryVault(fileId);
+            widebandRxBufferRef.current.delete(fileId);
+
+            let blob: Blob;
+            const resolvedMime = entry.fileMime || guessMimeFromName(entry.fileName);
+            if (vaultItem) {
+              blob =
+                vaultItem.blob.type === resolvedMime
+                  ? vaultItem.blob
+                  : new Blob([vaultItem.blob], { type: resolvedMime });
+            } else {
+              const ordered: Uint8Array[] = [];
+              for (let i = 1; i <= entry.totalWaves; i++) {
+                const c = entry.chunks.get(i);
+                if (c) ordered.push(c);
+              }
+              const totalLen = ordered.reduce((acc, c) => acc + c.byteLength, 0);
+              const contiguous = new Uint8Array(totalLen);
+              let offset = 0;
+              for (const c of ordered) {
+                contiguous.set(c, offset);
+                offset += c.byteLength;
+              }
+              blob = new Blob([contiguous], { type: resolvedMime });
+            }
+
+            const blobUrl = URL.createObjectURL(blob);
+            onIncomingAcousticMessage(
+              `Received Binary File: ${entry.fileName} (${formatBytesHuman(blob.size)})`,
+              `Acoustic Rx (${entry.totalWaves}/${entry.totalWaves} Waves)`,
+              {
+                fileName: entry.fileName,
+                fileSize: blob.size,
+                fileMime: resolvedMime,
+                fileBlobUrl: blobUrl,
+                crc: entry.crc,
+                mode: `${entry.totalWaves}/${entry.totalWaves} Waves`,
+              }
+            );
+          }
+          return;
+        }
+      }
+
+      onIncomingAcousticMessage(cleanText, 'Live Acoustic Rx');
+    },
+    [onIncomingAcousticMessage]
+  );
+
   const toggleMicListener = async () => {
     if (isListeningMic) {
       if (scriptNodeRef.current) {
@@ -435,7 +600,6 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       const scriptNode = audioCtx.createScriptProcessor(1024, 1, 1);
       scriptNodeRef.current = scriptNode;
 
-      // Zero-gain mute sink so ScriptProcessorNode NEVER leaks mic audio to speakers!
       const silentGain = audioCtx.createGain();
       silentGain.gain.value = 0;
 
@@ -443,15 +607,13 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
         const out = event.outputBuffer.getChannelData(0);
         out.fill(0);
 
-        // Half-duplex guard: do not decode our own speaker output while broadcasting
         if (isBroadcastingRef.current) return;
         const input = event.inputBuffer.getChannelData(0);
         if (rxSessionRef.current) {
           const decoded = rxSessionRef.current.decodeChunk(input);
-          if (decoded && decoded.trim().length > 0 && onIncomingAcousticMessage) {
+          if (decoded && decoded.trim().length > 0) {
             const cleanText = decoded.trim();
             const now = Date.now();
-            // Deduplicate identical frames within 4000ms so a message never appears twice
             if (
               lastRxDedupeRef.current.text === cleanText &&
               now - lastRxDedupeRef.current.time < 4000
@@ -459,7 +621,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
               return;
             }
             lastRxDedupeRef.current = { text: cleanText, time: now };
-            onIncomingAcousticMessage(cleanText, 'Live Acoustic Rx');
+            handleIncomingMicDecodedFrame(cleanText);
           }
         }
       };
@@ -477,7 +639,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     }
   };
 
-  // Universal 16-bit PCM WAV Voice Recorder (eliminates WebM/MP4 codec mismatch on iOS/iPadOS/Safari)
+  // Universal 16-bit PCM WAV Voice Recorder
   const startVoiceNoteRecording = async () => {
     if (!onSendVoiceMessage) return;
     try {
@@ -664,7 +826,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
         </div>
       </div>
 
-      {/* Live Binary File Streaming Progress Banner */}
+      {/* Live 1-Indexed Binary File Streaming Progress Banner */}
       {fileStreamProgress && (
         <div
           className="shrink-0 mt-3 p-3.5 rounded-2xl text-xs space-y-1.5"
@@ -675,7 +837,8 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
         >
           <div className="flex items-center justify-between font-bold">
             <span className="truncate">
-              Streaming {fileStreamProgress.fileName} over 48kHz OFDM Sound Bursts...
+              Transmitting Wave {fileStreamProgress.current}/{fileStreamProgress.total}:{' '}
+              {fileStreamProgress.fileName}
             </span>
             <span className="font-mono shrink-0">
               {formatBytesHuman(fileStreamProgress.transferredBytes)} /{' '}
@@ -695,7 +858,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
         </div>
       )}
 
-      {/* Scrollable Messages Viewport (flex-1 min-h-0 prevents top clipping and dead gaps) */}
+      {/* Scrollable Messages Viewport */}
       <div
         ref={messagesContainerRef}
         className="flex-1 min-h-0 overflow-y-auto px-1 sm:px-2 py-4 space-y-4"
@@ -757,6 +920,16 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
                     />
                   ) : msg.filePayload ? (
                     <div className="space-y-2">
+                      {msg.filePayload.fileBlobUrl &&
+                        msg.filePayload.fileMime?.startsWith('image/') && (
+                          <div className="rounded-2xl overflow-hidden bg-black/20 max-h-48 flex items-center justify-center">
+                            <img
+                              src={msg.filePayload.fileBlobUrl}
+                              alt={msg.filePayload.fileName}
+                              className="max-h-48 w-auto object-contain"
+                            />
+                          </div>
+                        )}
                       <div className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-black/15">
                         <div className="min-w-0">
                           <div className="font-extrabold text-xs sm:text-sm truncate">

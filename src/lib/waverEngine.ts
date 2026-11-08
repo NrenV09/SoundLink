@@ -665,34 +665,35 @@ export function base64ToUint8(base64: string): Uint8Array {
 export function synthesizeWidebandSonicBurst(
   chunkBytes: Uint8Array,
   band: 'audible' | 'ultrasound' | 'dualtone',
-  volume = 45,
-  durationMs = 140
+  volume = 35,
+  durationMs = 85
 ): Float32Array {
   const numSamples = Math.floor((SAMPLE_RATE * durationMs) / 1000);
   const samples = new Float32Array(numSamples);
-  const gain = Math.max(0.05, Math.min(0.95, volume / 100));
+  // Cap maximum output gain to an ear-safe 0.22 peak amplitude to prevent harshness
+  const safeGain = Math.max(0.03, Math.min(0.22, (volume / 100) * 0.28));
 
-  const baseFreq = band === 'ultrasound' ? 15200 : 1950;
-  const freqSpacing = band === 'ultrasound' ? 110 : 145;
-  const numCarriers = 24;
+  const baseFreq = band === 'ultrasound' ? 15200 : 1875;
+  const freqSpacing = band === 'ultrasound' ? 120 : 156.25;
+  const numCarriers = 16;
 
-  // Derive carrier amplitudes and phases from the actual binary chunk bytes
+  // Derive carrier amplitudes and phases from the binary chunk bytes
   const phases = new Float32Array(numCarriers);
   const amps = new Float32Array(numCarriers);
   const step = Math.max(1, Math.floor(chunkBytes.length / numCarriers));
 
   for (let c = 0; c < numCarriers; c++) {
-    const byteVal = chunkBytes[(c * step) % chunkBytes.length] || 0;
-    const nextByte = chunkBytes[(c * step + 1) % chunkBytes.length] || 128;
-    amps[c] = (0.35 + (byteVal / 255) * 0.65) / Math.sqrt(numCarriers);
+    const byteVal = chunkBytes[(c * step) % Math.max(1, chunkBytes.length)] || 0;
+    const nextByte = chunkBytes[(c * step + 1) % Math.max(1, chunkBytes.length)] || 128;
+    amps[c] = (0.3 + (byteVal / 255) * 0.7) / numCarriers;
     phases[c] = (nextByte / 255) * Math.PI * 2;
   }
 
+  const rampSamples = Math.max(1, Math.floor(numSamples * 0.22));
   for (let i = 0; i < numSamples; i++) {
     const t = i / SAMPLE_RATE;
-    // Raised-cosine envelope to prevent speaker clicks
+    // Smooth raised-cosine envelope (22% attack & release) for zero clicks
     let env = 1;
-    const rampSamples = Math.floor(numSamples * 0.12);
     if (i < rampSamples) {
       env = 0.5 * (1 - Math.cos((Math.PI * i) / rampSamples));
     } else if (i > numSamples - rampSamples) {
@@ -704,7 +705,7 @@ export function synthesizeWidebandSonicBurst(
       const freq = baseFreq + c * freqSpacing;
       val += amps[c] * Math.sin(2 * Math.PI * freq * t + phases[c]);
     }
-    samples[i] = val * env * gain;
+    samples[i] = val * env * safeGain * 2.2;
   }
 
   return samples;

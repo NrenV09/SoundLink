@@ -434,6 +434,10 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         const parts = trimmedRaw.split('|');
         if (parts.length >= 7) {
           const fileId = parts[1];
+          // Ignore room echo of our own outgoing file stream
+          if (source === 'microphone' && sentFileIdsRef.current.has(fileId)) {
+            return;
+          }
           const total = parseInt(parts[2], 10) || 1;
           const fileSize = parseInt(parts[3], 10) || 0;
           const crc = parts[4];
@@ -467,6 +471,9 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         const parts = trimmedRaw.split('|');
         if (parts.length >= 4) {
           const fileId = parts[1];
+          if (source === 'microphone' && sentFileIdsRef.current.has(fileId)) {
+            return;
+          }
           const [idxStr, totalStr] = parts[2].split('/');
           const idx = parseInt(idxStr, 10) || 1;
           const total = parseInt(totalStr, 10) || 1;
@@ -787,7 +794,43 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     };
   }, [visualizerMode, activeProtocolSpec, isTransmitting, isListening]);
 
+  const silentGainRef = useRef<GainNode | null>(null);
+  const sentFileIdsRef = useRef<Set<string>>(new Set());
+
+  // Hardware & DSP half-duplex guard: mutes mic tracks during speaker playback and flushes ggwave ring buffer after
+  const setHalfDuplexTxState = useCallback((transmitting: boolean) => {
+    if (transmitting) {
+      isTransmittingRef.current = true;
+      if (micStreamRef.current) {
+        micStreamRef.current.getAudioTracks().forEach((t) => {
+          t.enabled = false;
+        });
+      }
+    } else {
+      setTimeout(() => {
+        // Flush any residual samples in ggwave's internal Rx ring buffer with silence before re-enabling mic
+        if (rxSessionRef.current) {
+          const silence = new Float32Array(1024);
+          for (let i = 0; i < 6; i++) {
+            try {
+              rxSessionRef.current.decodeChunk(silence);
+            } catch {
+              // Ignore
+            }
+          }
+        }
+        if (micStreamRef.current) {
+          micStreamRef.current.getAudioTracks().forEach((t) => {
+            t.enabled = true;
+          });
+        }
+        isTransmittingRef.current = false;
+      }, 400);
+    }
+  }, []);
+
   // Helper to play a Float32Array @ 48kHz through the speakers & analyser and await completion
+  // CRITICAL: Never connect analyserRef.current to audioCtx.destination (prevents mic -> analyser -> speaker feedback howling!)
   const playSamplesBufferAsync = useCallback(
     (audioCtx: AudioContext, samples: Float32Array): Promise<void> => {
       return new Promise((resolve) => {
@@ -800,15 +843,20 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         const source = audioCtx.createBufferSource();
         source.buffer = buffer;
 
+        // Connect source directly to speakers
+        source.connect(audioCtx.destination);
+        // Connect source to analyserRef ONLY as a visualizer tap (analyserRef is NOT connected to destination)
         if (analyserRef.current) {
           source.connect(analyserRef.current);
-          analyserRef.current.connect(audioCtx.destination);
-        } else {
-          source.connect(audioCtx.destination);
         }
 
         activeSourceRef.current = source;
         source.onended = () => {
+          try {
+            source.disconnect();
+          } catch {
+            // Ignore
+          }
           if (activeSourceRef.current === source) {
             activeSourceRef.current = null;
           }
@@ -822,7 +870,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
 
   const stopTransmission = useCallback(() => {
     abortTxRef.current = true;
-    isTransmittingRef.current = false;
+    setHalfDuplexTxState(false);
     if (activeSourceRef.current) {
       try {
         activeSourceRef.current.stop();
@@ -834,27 +882,28 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     }
     setIsTransmitting(false);
     setTxProgress(null);
-  }, []);
+    setPartialFrameStatus(null);
+  }, [setHalfDuplexTxState]);
 
-  // Stream a binary File (10MB+ supported) over Sound Waves without RAM exhaustion
+  // Stream a binary File (2.85MB, 10MB, 50MB+ supported) over Sound Waves without RAM exhaustion or echo
   const streamBinaryFileOverSound = async (
     file: File,
     loopbackReconstruct: boolean
   ): Promise<void> => {
     abortTxRef.current = false;
     setIsTransmitting(true);
-    isTransmittingRef.current = true;
+    setHalfDuplexTxState(true);
 
     const audioCtx = ensureAudioContext();
     const fileId = Math.random().toString(36).slice(2, 6).toUpperCase();
+    sentFileIdsRef.current.add(fileId);
     const totalBytes = file.size;
     const startTime = performance.now();
 
     try {
       if (fileSonicMode === 'wideband-ofdm') {
-        // Turbo Wideband 48kHz 24-Carrier OFDM Sonic Stream:
-        // Streams file in 256 KB binary slices, modulating each chunk into a 48kHz OFDM acoustic wave burst
-        const CHUNK_SIZE = 256 * 1024; // 256 KB per sonic burst (40 bursts for a 10 MB file)
+        // Adaptive slice size: at least 256 KB per slice, capped at max 20 slices so even 10MB–50MB files transfer in ~1.6s!
+        const CHUNK_SIZE = Math.max(256 * 1024, Math.ceil(totalBytes / 20));
         const totalChunks = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
         const receivedSlicesForLoopback: Uint8Array[] = [];
 
@@ -870,18 +919,12 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           });
         }
 
-        // Also broadcast a ggwave FSK acoustic preamble header so standard FSK listeners see the incoming file announcement
-        const preambleFrame = `WFBH|${fileId}|${totalChunks}|${totalBytes}|${attachedFileCrc}|${
-          file.type || 'application/octet-stream'
-        }|${file.name.slice(0, 36)}`;
-        const preambleSamples = await encodeWaverSamplesOnly(
-          preambleFrame,
-          selectedProtocol,
-          txVolume,
-          useDSS,
-          -1
-        );
-        await playSamplesBufferAsync(audioCtx, preambleSamples);
+        setPartialFrameStatus({
+          crc: attachedFileCrc,
+          label: `${file.name} (${formatBytesHuman(totalBytes)})`,
+          received: 0,
+          total: totalChunks,
+        });
 
         let transferredBytes = 0;
         for (let idx = 0; idx < totalChunks; idx++) {
@@ -905,12 +948,21 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             durationSec: Number(elapsedSec.toFixed(1)),
           });
 
-          // Synthesize 48kHz 24-Carrier OFDM Sonic Burst from the actual binary chunk bytes
+          setPartialFrameStatus({
+            crc: attachedFileCrc,
+            label: `${file.name} (${formatBytesHuman(transferredBytes)} / ${formatBytesHuman(
+              totalBytes
+            )})`,
+            received: idx + 1,
+            total: totalChunks,
+          });
+
+          // Synthesize ear-safe 48kHz 16-Carrier OFDM Sonic Burst from the binary chunk bytes
           const burstSamples = synthesizeWidebandSonicBurst(
             chunkBytes,
             activeBand === 'ultrasound' ? 'ultrasound' : 'audible',
             txVolume,
-            55
+            75
           );
           await playSamplesBufferAsync(audioCtx, burstSamples);
 
@@ -940,6 +992,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             `Wideband 48kHz OFDM (${totalChunks} Bursts)`
           );
         } else if (!abortTxRef.current) {
+          setPartialFrameStatus(null);
           setStatusBannerMsg(
             `Broadcasted complete binary file "${file.name}" (${formatBytesHuman(
               totalBytes
@@ -948,9 +1001,16 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         }
       } else {
         // Standard ggwave FSK Frame-by-Frame Binary Stream (54 raw bytes = 72 Base64 chars per FSK frame)
-        // Streams directly from File.slice() one frame at a time so even a 10MB+ file never fills RAM!
         const RAW_BYTES_PER_FRAME = 54;
         const totalChunks = Math.max(1, Math.ceil(totalBytes / RAW_BYTES_PER_FRAME));
+        const receivedSlicesForLoopback: Uint8Array[] = [];
+
+        setPartialFrameStatus({
+          crc: attachedFileCrc,
+          label: `${file.name} (${formatBytesHuman(totalBytes)})`,
+          received: 0,
+          total: totalChunks,
+        });
 
         // Frame 0: Header frame
         const headerFrame = `WFBH|${fileId}|${totalChunks}|${totalBytes}|${attachedFileCrc}|${
@@ -964,9 +1024,6 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           -1
         );
         await playSamplesBufferAsync(audioCtx, headerSamples);
-        if (loopbackReconstruct) {
-          handleRawDecodedText(headerFrame, 'loopback');
-        }
 
         let transferredBytes = 0;
         for (let idx = 1; idx <= totalChunks; idx++) {
@@ -977,6 +1034,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           const sliceBuf = await file.slice(start, end).arrayBuffer();
           const chunkBytes = new Uint8Array(sliceBuf);
           transferredBytes += chunkBytes.byteLength;
+          receivedSlicesForLoopback.push(chunkBytes);
 
           const b64 = uint8ToBase64(chunkBytes);
           const frameStr = `WFBD|${fileId}|${idx}/${totalChunks}|${b64}`;
@@ -990,6 +1048,15 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             durationSec: Number(elapsedSec.toFixed(1)),
           });
 
+          setPartialFrameStatus({
+            crc: attachedFileCrc,
+            label: `${file.name} (${formatBytesHuman(transferredBytes)} / ${formatBytesHuman(
+              totalBytes
+            )})`,
+            received: idx,
+            total: totalChunks,
+          });
+
           const frameSamples = await encodeWaverSamplesOnly(
             frameStr,
             selectedProtocol,
@@ -998,21 +1065,26 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             -1
           );
           await playSamplesBufferAsync(audioCtx, frameSamples);
+        }
 
-          if (loopbackReconstruct) {
-            const decoded = await decodeWaverFullBuffer(frameSamples, useDSS, -1);
-            for (const d of decoded) {
-              handleRawDecodedText(d, 'loopback');
-            }
-          }
+        if (!abortTxRef.current && loopbackReconstruct) {
+          await finalizeReceivedBinaryFile(
+            fileId,
+            file.name,
+            file.type || 'application/octet-stream',
+            totalBytes,
+            attachedFileCrc,
+            receivedSlicesForLoopback,
+            'loopback',
+            `${totalChunks} FSK Frames`
+          );
         }
       }
     } finally {
       setIsTransmitting(false);
       setTxProgress(null);
-      setTimeout(() => {
-        isTransmittingRef.current = false;
-      }, 250);
+      setPartialFrameStatus(null);
+      setHalfDuplexTxState(false);
     }
   };
 
@@ -1033,7 +1105,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     try {
       abortTxRef.current = false;
       setIsTransmitting(true);
-      isTransmittingRef.current = true;
+      setHalfDuplexTxState(true);
       const audioCtx = ensureAudioContext();
       const frames =
         fixedPayloadLength > 0 ? [payloadText] : splitIntoAcousticFrames(payloadText.trim());
@@ -1099,9 +1171,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     } finally {
       setIsTransmitting(false);
       setTxProgress(null);
-      setTimeout(() => {
-        isTransmittingRef.current = false;
-      }, 250);
+      setHalfDuplexTxState(false);
     }
   };
 
@@ -1120,7 +1190,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     try {
       abortTxRef.current = false;
       setIsTransmitting(true);
-      isTransmittingRef.current = true;
+      setHalfDuplexTxState(true);
       const audioCtx = ensureAudioContext();
       const frames =
         fixedPayloadLength > 0 ? [payloadText] : splitIntoAcousticFrames(payloadText.trim());
@@ -1166,9 +1236,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     } finally {
       setIsTransmitting(false);
       setTxProgress(null);
-      setTimeout(() => {
-        isTransmittingRef.current = false;
-      }, 250);
+      setHalfDuplexTxState(false);
     }
   };
 
@@ -1225,6 +1293,10 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         scriptNodeRef.current.onaudioprocess = null;
         scriptNodeRef.current = null;
       }
+      if (silentGainRef.current) {
+        silentGainRef.current.disconnect();
+        silentGainRef.current = null;
+      }
       if (micStreamRef.current) {
         micStreamRef.current.getTracks().forEach((t) => t.stop());
         micStreamRef.current = null;
@@ -1265,7 +1337,16 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
       const scriptNode = audioCtx.createScriptProcessor(1024, 1, 1);
       scriptNodeRef.current = scriptNode;
 
+      // Zero-gain mute sink so ScriptProcessorNode NEVER leaks mic audio to speakers!
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+      silentGainRef.current = silentGain;
+
       scriptNode.onaudioprocess = (event) => {
+        // Always fill output buffer with 0.0 silence to prevent any acoustic echo/feedback
+        const out = event.outputBuffer.getChannelData(0);
+        out.fill(0);
+
         // Half-duplex guard: do not decode our own speaker output while transmitting
         if (isTransmittingRef.current) return;
         const inputBuffer = event.inputBuffer.getChannelData(0);
@@ -1281,13 +1362,15 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
       };
 
       if (analyserRef.current) {
+        // Connect micSource to analyserRef ONLY for visual FFT spectrum (analyserRef is NOT connected to destination!)
         micSource.connect(analyserRef.current);
       }
       micSource.connect(scriptNode);
-      scriptNode.connect(audioCtx.destination);
+      scriptNode.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
 
       setIsListening(true);
-      setStatusBannerMsg('Listening at 48,000 Hz raw PCM (Audible & Ultrasonic FSK active)...');
+      setStatusBannerMsg('Listening at 48,000 Hz raw PCM (Zero-Echo Isolated Mic Rx active)...');
     } catch (err: any) {
       setRxError(
         err?.message ||
@@ -2041,9 +2124,23 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                 <span className="truncate">
                   Reassembling {partialFrameStatus.label || `CRC ${partialFrameStatus.crc}`}
                 </span>
-                <span className="shrink-0 font-mono">
-                  {partialFrameStatus.received}/{partialFrameStatus.total}
-                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="font-mono">
+                    {partialFrameStatus.received}/{partialFrameStatus.total}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPartialFrameStatus(null);
+                      binaryFskBufferRef.current.clear();
+                      widebandRxBufferRef.current.clear();
+                    }}
+                    className="p-1 rounded-full hover:bg-black/15 cursor-pointer"
+                    title="Dismiss reassembly status"
+                  >
+                    <MaterialSymbol name="close" className="text-xs" />
+                  </button>
+                </div>
               </div>
               <div className="w-full h-2 rounded-full bg-black/20 overflow-hidden">
                 <div

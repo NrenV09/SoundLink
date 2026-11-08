@@ -179,6 +179,36 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     };
   }, [onIncomingAcousticMessage]);
 
+  const setHalfDuplexChatTxState = useCallback((broadcasting: boolean) => {
+    if (broadcasting) {
+      isBroadcastingRef.current = true;
+      if (micStreamRef.current) {
+        micStreamRef.current.getAudioTracks().forEach((t) => {
+          t.enabled = false;
+        });
+      }
+    } else {
+      setTimeout(() => {
+        if (rxSessionRef.current) {
+          const silence = new Float32Array(1024);
+          for (let i = 0; i < 6; i++) {
+            try {
+              rxSessionRef.current.decodeChunk(silence);
+            } catch {
+              // Ignore
+            }
+          }
+        }
+        if (micStreamRef.current) {
+          micStreamRef.current.getAudioTracks().forEach((t) => {
+            t.enabled = true;
+          });
+        }
+        isBroadcastingRef.current = false;
+      }, 400);
+    }
+  }, []);
+
   const playSamplesBufferAsync = useCallback(
     (audioCtx: AudioContext, samples: Float32Array): Promise<void> => {
       return new Promise((resolve) => {
@@ -187,7 +217,14 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
         const source = audioCtx.createBufferSource();
         source.buffer = buffer;
         source.connect(audioCtx.destination);
-        source.onended = () => resolve();
+        source.onended = () => {
+          try {
+            source.disconnect();
+          } catch {
+            // Ignore
+          }
+          resolve();
+        };
         source.start(0);
       });
     },
@@ -200,7 +237,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
 
     try {
       setIsBroadcasting(true);
-      isBroadcastingRef.current = true;
+      setHalfDuplexChatTxState(true);
       const audioCtx = ensureAudioContext();
 
       // Avoid prepending duplicate "senderName: " prefixes when replaying messages
@@ -216,16 +253,14 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
 
       await playSamplesBufferAsync(audioCtx, encoded.samples);
       setIsBroadcasting(false);
-      setTimeout(() => {
-        isBroadcastingRef.current = false;
-      }, 300);
+      setHalfDuplexChatTxState(false);
 
       setStatusNote(
         `Broadcasted (${encoded.durationSeconds}s · ${encoded.protocol.shortLabel})`
       );
     } catch (err: any) {
       setIsBroadcasting(false);
-      isBroadcastingRef.current = false;
+      setHalfDuplexChatTxState(false);
       setStatusNote(`Modulation error: ${err?.message}`);
     }
   };
@@ -238,14 +273,14 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
 
     try {
       setIsBroadcasting(true);
-      isBroadcastingRef.current = true;
+      setHalfDuplexChatTxState(true);
       const audioCtx = ensureAudioContext();
 
       const sampleSlice = await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer();
       const crc = crc16BytesHex(new Uint8Array(sampleSlice));
       const fileId = Math.random().toString(36).slice(2, 6).toUpperCase();
 
-      const CHUNK_SIZE = 256 * 1024;
+      const CHUNK_SIZE = Math.max(256 * 1024, Math.ceil(file.size / 20));
       const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
       const reconstructedChunks: Uint8Array[] = [];
 
@@ -260,19 +295,6 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           totalChunks,
         });
       }
-
-      // Broadcast acoustic preamble header frame
-      const headerStr = `WFBH|${fileId}|${totalChunks}|${file.size}|${crc}|${
-        file.type || 'application/octet-stream'
-      }|${file.name.slice(0, 36)}`;
-      const headerSamples = await encodeWaverSamplesOnly(
-        headerStr,
-        selectedProtocol,
-        txVolume,
-        false,
-        -1
-      );
-      await playSamplesBufferAsync(audioCtx, headerSamples);
 
       let transferredBytes = 0;
       for (let idx = 0; idx < totalChunks; idx++) {
@@ -295,7 +317,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           chunkBytes,
           selectedProtocol.startsWith('ULTRASOUND') ? 'ultrasound' : 'audible',
           txVolume,
-          50
+          75
         );
         await playSamplesBufferAsync(audioCtx, burst);
 
@@ -334,9 +356,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     } finally {
       setFileStreamProgress(null);
       setIsBroadcasting(false);
-      setTimeout(() => {
-        isBroadcastingRef.current = false;
-      }, 300);
+      setHalfDuplexChatTxState(false);
     }
   };
 
@@ -355,15 +375,13 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     const sampleReply = `ACK from Acoustic Node @ ${new Date().toLocaleTimeString()} · Signal Verified`;
     try {
       setIsBroadcasting(true);
-      isBroadcastingRef.current = true;
+      setHalfDuplexChatTxState(true);
       const encoded = await encodeWaverWaveform(sampleReply, selectedProtocol, txVolume, false, -1);
       const audioCtx = ensureAudioContext();
       await playSamplesBufferAsync(audioCtx, encoded.samples);
 
       setIsBroadcasting(false);
-      setTimeout(() => {
-        isBroadcastingRef.current = false;
-      }, 300);
+      setHalfDuplexChatTxState(false);
 
       const decoded = await decodeWaverFullBuffer(encoded.samples, false, -1);
       if (decoded.length > 0 && onIncomingAcousticMessage) {
@@ -372,7 +390,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       setStatusNote(`Loopback decoded ${encoded.byteLength}B via ggwave WASM.`);
     } catch (err: any) {
       setIsBroadcasting(false);
-      isBroadcastingRef.current = false;
+      setHalfDuplexChatTxState(false);
       setStatusNote(`Loopback failed: ${err?.message}`);
     }
   };
@@ -417,7 +435,14 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       const scriptNode = audioCtx.createScriptProcessor(1024, 1, 1);
       scriptNodeRef.current = scriptNode;
 
+      // Zero-gain mute sink so ScriptProcessorNode NEVER leaks mic audio to speakers!
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+
       scriptNode.onaudioprocess = (event) => {
+        const out = event.outputBuffer.getChannelData(0);
+        out.fill(0);
+
         // Half-duplex guard: do not decode our own speaker output while broadcasting
         if (isBroadcastingRef.current) return;
         const input = event.inputBuffer.getChannelData(0);
@@ -440,9 +465,10 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       };
 
       micSource.connect(scriptNode);
-      scriptNode.connect(audioCtx.destination);
+      scriptNode.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
       setIsListeningMic(true);
-      setStatusNote('Listening for incoming 48kHz acoustic chat waves...');
+      setStatusNote('Listening for incoming 48kHz acoustic chat waves (Zero-Echo Isolated)...');
     } catch (err: any) {
       setStatusNote(
         err?.message || 'Microphone unavailable. Use Loopback Ping to test decoding.'
@@ -465,7 +491,12 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       const processor = audioCtx.createScriptProcessor(4096, 1, 1);
       voiceProcessorRef.current = processor;
 
+      const silentVoiceGain = audioCtx.createGain();
+      silentVoiceGain.gain.value = 0;
+
       processor.onaudioprocess = (e) => {
+        const out = e.outputBuffer.getChannelData(0);
+        out.fill(0);
         const channelData = e.inputBuffer.getChannelData(0);
         const copy = new Float32Array(channelData.length);
         copy.set(channelData);
@@ -473,7 +504,8 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       };
 
       source.connect(processor);
-      processor.connect(audioCtx.destination);
+      processor.connect(silentVoiceGain);
+      silentVoiceGain.connect(audioCtx.destination);
 
       setIsRecordingVoice(true);
       setRecordingDuration(0);

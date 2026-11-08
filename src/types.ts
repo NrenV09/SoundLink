@@ -10,6 +10,14 @@ export interface ChatMessage {
   senderAvatar?: string;
   senderId?: string;
   audioData?: string;
+  filePayload?: {
+    fileName: string;
+    fileSize: number;
+    fileMime: string;
+    fileBlobUrl: string;
+    crc: string;
+    mode?: string;
+  };
   timestamp: Date;
 }
 

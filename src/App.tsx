@@ -154,12 +154,21 @@ export default function App() {
     }
   };
 
-  const handleSendChatMessage = (text: string) => {
+  const lastIncomingDedupeRef = useRef<{ signature: string; time: number }>({
+    signature: '',
+    time: 0,
+  });
+
+  const handleSendChatMessage = (
+    text: string,
+    filePayload?: ChatMessage['filePayload']
+  ) => {
     const msg: ChatMessage = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       sender: 'me',
       senderName: profile.username,
       text,
+      filePayload,
       timestamp: new Date(),
     };
     setChatMessages((prev) => [...prev, msg]);
@@ -178,12 +187,30 @@ export default function App() {
   };
 
   const handleIncomingAcousticChat = useCallback(
-    (text: string, protocolLabel: string) => {
+    (
+      text: string,
+      protocolLabel: string,
+      filePayload?: ChatMessage['filePayload']
+    ) => {
+      const normalized = (filePayload
+        ? `FILE:${filePayload.fileName}:${filePayload.fileSize}:${filePayload.crc}`
+        : text
+      ).trim();
+      const now = Date.now();
+      if (
+        lastIncomingDedupeRef.current.signature === normalized &&
+        now - lastIncomingDedupeRef.current.time < 4500
+      ) {
+        return;
+      }
+      lastIncomingDedupeRef.current = { signature: normalized, time: now };
+
       const msg: ChatMessage = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: `${now}-${Math.random().toString(36).slice(2, 6)}`,
         sender: 'them',
         senderName: `Acoustic Rx (${protocolLabel})`,
         text,
+        filePayload,
         timestamp: new Date(),
       };
       setChatMessages((prev) => [...prev, msg]);
@@ -195,6 +222,33 @@ export default function App() {
   );
 
   const handlePacketDecodedFromWaver = useCallback((pkt: DecodedAcousticPacket) => {
+    const filePayload: ChatMessage['filePayload'] | undefined =
+      pkt.isFilePayload && pkt.fileName && pkt.fileBlobUrl
+        ? {
+            fileName: pkt.fileName,
+            fileSize: pkt.fileSize || pkt.byteLength,
+            fileMime: pkt.fileMime || 'application/octet-stream',
+            fileBlobUrl: pkt.fileBlobUrl,
+            crc: pkt.crc,
+            mode: pkt.frameInfo || pkt.protocolHint,
+          }
+        : undefined;
+
+    const textBody =
+      pkt.isFilePayload && pkt.fileContent ? pkt.fileContent : pkt.text;
+    const normalized = (filePayload
+      ? `FILE:${filePayload.fileName}:${filePayload.fileSize}:${filePayload.crc}`
+      : textBody
+    ).trim();
+    const now = Date.now();
+    if (
+      lastIncomingDedupeRef.current.signature === normalized &&
+      now - lastIncomingDedupeRef.current.time < 4500
+    ) {
+      return;
+    }
+    lastIncomingDedupeRef.current = { signature: normalized, time: now };
+
     const msg: ChatMessage = {
       id: pkt.id,
       sender: 'them',
@@ -205,7 +259,8 @@ export default function App() {
           ? 'Loopback'
           : 'WAV'
       }`,
-      text: pkt.isFilePayload && pkt.fileContent ? pkt.fileContent : pkt.text,
+      text: textBody,
+      filePayload,
       timestamp: new Date(pkt.timestamp),
     };
     setChatMessages((prev) => [...prev, msg]);

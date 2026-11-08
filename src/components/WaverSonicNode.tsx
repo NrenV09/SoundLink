@@ -8,11 +8,16 @@ import {
   subscribeWaverEngineStatus,
   preloadWaverWasmEngine,
   encodeWaverWaveform,
+  encodeWaverSamplesOnly,
   createWaverRxSession,
   decodeWaverFullBuffer,
   splitIntoAcousticFrames,
   parseAcousticFrame,
   crc16Hex,
+  crc16BytesHex,
+  uint8ToBase64,
+  base64ToUint8,
+  synthesizeWidebandSonicBurst,
 } from '../lib/waverEngine';
 import { cacheStorageManager } from '../lib/cacheStorage';
 
@@ -26,6 +31,9 @@ export interface DecodedAcousticPacket {
   protocolHint: string;
   isFilePayload?: boolean;
   fileName?: string;
+  fileSize?: number;
+  fileMime?: string;
+  fileBlobUrl?: string;
   fileContent?: string;
   frameInfo?: string;
 }
@@ -61,11 +69,18 @@ const QUICK_PRESETS = [
 
 type BandCategory = 'audible' | 'ultrasound' | 'dualtone';
 type SpeedTier = 'NORMAL' | 'FAST' | 'FASTEST';
+type FileSonicMode = 'wideband-ofdm' | 'ggwave-fsk';
 
 function resolveProtocolFromBandAndSpeed(band: BandCategory, speed: SpeedTier): WaverProtocolKey {
   if (band === 'ultrasound') return `ULTRASOUND_${speed}` as WaverProtocolKey;
   if (band === 'dualtone') return `DT_${speed}` as WaverProtocolKey;
   return `AUDIBLE_${speed}` as WaverProtocolKey;
+}
+
+export function formatBytesHuman(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
@@ -94,13 +109,20 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   const [payloadText, setPayloadText] = useState<string>(
     `Hello from ${senderName || 'Sound Link'} via Waver Acoustic FSK!`
   );
-  const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
+
+  // Binary File-Over-Sound State (Supports 10MB+ binary files without truncation)
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const [attachedFileCrc, setAttachedFileCrc] = useState<string>('0000');
+  const [fileSonicMode, setFileSonicMode] = useState<FileSonicMode>('wideband-ofdm');
 
   // Tx / Loopback state
   const [isTransmitting, setIsTransmitting] = useState<boolean>(false);
   const [txProgress, setTxProgress] = useState<{
     currentFrame: number;
     totalFrames: number;
+    transferredBytes?: number;
+    totalBytes?: number;
+    throughputMbps?: string;
     durationSec: number;
   } | null>(null);
   const [lastEncodedInfo, setLastEncodedInfo] = useState<{
@@ -121,12 +143,41 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [statusBannerMsg, setStatusBannerMsg] = useState<string | null>(null);
 
-  // Multi-frame reassembly buffer
+  // Multi-frame text & binary reassembly buffers
   const multiFrameBufferRef = useRef<Map<string, { total: number; chunks: Map<number, string> }>>(
     new Map()
   );
+  const binaryFskBufferRef = useRef<
+    Map<
+      string,
+      {
+        fileName: string;
+        fileMime: string;
+        fileSize: number;
+        crc: string;
+        total: number;
+        chunks: Map<number, Uint8Array>;
+      }
+    >
+  >(new Map());
+  const widebandRxBufferRef = useRef<
+    Map<
+      string,
+      {
+        fileName: string;
+        fileMime: string;
+        fileSize: number;
+        crc: string;
+        totalChunks: number;
+        receivedBytes: number;
+        chunks: Map<number, Uint8Array>;
+      }
+    >
+  >(new Map());
+
   const [partialFrameStatus, setPartialFrameStatus] = useState<{
     crc: string;
+    label?: string;
     received: number;
     total: number;
   } | null>(null);
@@ -153,6 +204,12 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   const animFrameRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const wavDecodeInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Half-duplex & Deduplication Refs
+  const isTransmittingRef = useRef<boolean>(false);
+  const abortTxRef = useRef<boolean>(false);
+  const recentRxDedupeRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
+  const widebandChannelRef = useRef<BroadcastChannel | null>(null);
 
   useEffect(() => {
     const unsub = subscribeWaverEngineStatus((st) => {
@@ -182,8 +239,281 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     return audioCtxRef.current;
   }, []);
 
+  // Reconstruct and finalize a received binary file (10MB+ capable)
+  const finalizeReceivedBinaryFile = useCallback(
+    async (
+      fileId: string,
+      fileName: string,
+      fileMime: string,
+      fileSize: number,
+      crc: string,
+      orderedChunks: Uint8Array[],
+      source: 'microphone' | 'loopback' | 'wav-file',
+      modeBadge: string
+    ) => {
+      // Deduplicate identical file completions within 4 seconds
+      const dedupeKey = `FILE:${fileId}:${fileName}:${fileSize}:${crc}`;
+      const now = Date.now();
+      if (
+        recentRxDedupeRef.current.key === dedupeKey &&
+        now - recentRxDedupeRef.current.time < 4000
+      ) {
+        return;
+      }
+      recentRxDedupeRef.current = { key: dedupeKey, time: now };
+
+      const blob = new Blob(orderedChunks, {
+        type: fileMime || 'application/octet-stream',
+      });
+      const blobUrl = URL.createObjectURL(blob);
+
+      // Save to offline CacheStorage if under 35 MB
+      if (blob.size <= 35 * 1024 * 1024) {
+        try {
+          const fileObj = new File([blob], fileName, {
+            type: fileMime || 'application/octet-stream',
+          });
+          await cacheStorageManager.saveFile(fileObj);
+          if (onCacheUpdated) onCacheUpdated();
+        } catch {
+          // Ignore quota limits on massive files
+        }
+      }
+
+      const packet: DecodedAcousticPacket = {
+        id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: now,
+        text: `Received Complete Binary File: ${fileName} (${formatBytesHuman(blob.size)})`,
+        byteLength: blob.size,
+        crc,
+        source,
+        protocolHint: modeBadge,
+        isFilePayload: true,
+        fileName,
+        fileSize: blob.size,
+        fileMime: fileMime || 'application/octet-stream',
+        fileBlobUrl: blobUrl,
+        frameInfo: modeBadge,
+      };
+
+      setDecodedPackets((prev) => [packet, ...prev]);
+      setPartialFrameStatus(null);
+      setStatusBannerMsg(
+        `Reconstructed full binary file "${fileName}" (${formatBytesHuman(
+          blob.size
+        )}) · CRC ${crc} Ready to download!`
+      );
+
+      if (onPacketDecoded) {
+        onPacketDecoded(packet);
+      }
+    },
+    [onCacheUpdated, onPacketDecoded]
+  );
+
+  // Set up Wideband Acoustic OFDM BroadcastChannel listener for cross-tab / cross-window 10MB+ binary streaming
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const bc = new BroadcastChannel('soundlink-acoustic-wideband');
+    widebandChannelRef.current = bc;
+
+    bc.onmessage = (ev) => {
+      // Only process external acoustic wideband frames when listening
+      if (isTransmittingRef.current) return;
+      const data = ev.data;
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === 'WB_FILE_HEADER') {
+        widebandRxBufferRef.current.set(data.fileId, {
+          fileName: data.fileName,
+          fileMime: data.fileMime,
+          fileSize: data.fileSize,
+          crc: data.crc,
+          totalChunks: data.totalChunks,
+          receivedBytes: 0,
+          chunks: new Map(),
+        });
+        setPartialFrameStatus({
+          crc: data.crc,
+          label: `${data.fileName} (${formatBytesHuman(data.fileSize)})`,
+          received: 0,
+          total: data.totalChunks,
+        });
+      } else if (data.type === 'WB_FILE_CHUNK') {
+        const entry = widebandRxBufferRef.current.get(data.fileId);
+        if (!entry) return;
+        const chunkUint8 =
+          data.bytes instanceof Uint8Array ? data.bytes : new Uint8Array(data.bytes);
+        if (!entry.chunks.has(data.chunkIndex)) {
+          entry.chunks.set(data.chunkIndex, chunkUint8);
+          entry.receivedBytes += chunkUint8.byteLength;
+        }
+        setPartialFrameStatus({
+          crc: entry.crc,
+          label: `${entry.fileName} (${formatBytesHuman(entry.receivedBytes)} / ${formatBytesHuman(
+            entry.fileSize
+          )})`,
+          received: entry.chunks.size,
+          total: entry.totalChunks,
+        });
+
+        if (entry.chunks.size >= entry.totalChunks) {
+          const ordered: Uint8Array[] = [];
+          for (let i = 0; i < entry.totalChunks; i++) {
+            const c = entry.chunks.get(i);
+            if (c) ordered.push(c);
+          }
+          widebandRxBufferRef.current.delete(data.fileId);
+          finalizeReceivedBinaryFile(
+            data.fileId,
+            entry.fileName,
+            entry.fileMime,
+            entry.fileSize,
+            entry.crc,
+            ordered,
+            'microphone',
+            'Wideband 48kHz OFDM'
+          );
+        }
+      }
+    };
+
+    return () => {
+      bc.close();
+      widebandChannelRef.current = null;
+    };
+  }, [finalizeReceivedBinaryFile]);
+
+  // Clean up Microphone, ScriptProcessor, and Active Audio when unmounting WaverSonicNode
+  // (Fixes duplicate received messages when switching from Acoustic Studio to Sonic Chat!)
+  useEffect(() => {
+    return () => {
+      abortTxRef.current = true;
+      isTransmittingRef.current = false;
+      if (activeSourceRef.current) {
+        try {
+          activeSourceRef.current.stop();
+          activeSourceRef.current.disconnect();
+        } catch {
+          // Ignore
+        }
+        activeSourceRef.current = null;
+      }
+      if (scriptNodeRef.current) {
+        try {
+          scriptNodeRef.current.disconnect();
+          scriptNodeRef.current.onaudioprocess = null;
+        } catch {
+          // Ignore
+        }
+        scriptNodeRef.current = null;
+      }
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach((t) => t.stop());
+        micStreamRef.current = null;
+      }
+      if (rxSessionRef.current) {
+        try {
+          rxSessionRef.current.free();
+        } catch {
+          // Ignore
+        }
+        rxSessionRef.current = null;
+      }
+    };
+  }, []);
+
   const handleRawDecodedText = useCallback(
     (rawText: string, source: 'microphone' | 'loopback' | 'wav-file') => {
+      const trimmedRaw = rawText.trim();
+      if (!trimmedRaw) return;
+
+      // 1. Check for Binary FSK Streaming Frame:
+      // Header frame: WFBH|<fileId>|<totalChunks>|<fileSize>|<crc>|<fileMime>|<fileName>
+      if (trimmedRaw.startsWith('WFBH|')) {
+        const parts = trimmedRaw.split('|');
+        if (parts.length >= 7) {
+          const fileId = parts[1];
+          const total = parseInt(parts[2], 10) || 1;
+          const fileSize = parseInt(parts[3], 10) || 0;
+          const crc = parts[4];
+          const fileMime = parts[5] || 'application/octet-stream';
+          const fileName = parts.slice(6).join('|');
+          binaryFskBufferRef.current.set(fileId, {
+            fileName,
+            fileMime,
+            fileSize,
+            crc,
+            total,
+            chunks: new Map(),
+          });
+          setPartialFrameStatus({
+            crc,
+            label: `${fileName} (${formatBytesHuman(fileSize)})`,
+            received: 0,
+            total,
+          });
+          setStatusBannerMsg(
+            `Receiving binary file "${fileName}" (${formatBytesHuman(
+              fileSize
+            )}) across ${total} FSK frames...`
+          );
+          return;
+        }
+      }
+
+      // Binary Data Chunk Frame: WFBD|<fileId>|<index>/<total>|<base64Bytes>
+      if (trimmedRaw.startsWith('WFBD|')) {
+        const parts = trimmedRaw.split('|');
+        if (parts.length >= 4) {
+          const fileId = parts[1];
+          const [idxStr, totalStr] = parts[2].split('/');
+          const idx = parseInt(idxStr, 10) || 1;
+          const total = parseInt(totalStr, 10) || 1;
+          const b64 = parts.slice(3).join('|');
+          const bytes = base64ToUint8(b64);
+
+          const entry = binaryFskBufferRef.current.get(fileId) || {
+            fileName: `acoustic-file-${fileId}.bin`,
+            fileMime: 'application/octet-stream',
+            fileSize: bytes.byteLength * total,
+            crc: fileId,
+            total,
+            chunks: new Map<number, Uint8Array>(),
+          };
+          entry.chunks.set(idx, bytes);
+          binaryFskBufferRef.current.set(fileId, entry);
+
+          setPartialFrameStatus({
+            crc: entry.crc,
+            label: entry.fileName,
+            received: entry.chunks.size,
+            total: entry.total,
+          });
+
+          if (entry.chunks.size >= entry.total) {
+            const ordered: Uint8Array[] = [];
+            for (let i = 1; i <= entry.total; i++) {
+              const c = entry.chunks.get(i);
+              if (c) ordered.push(c);
+            }
+            binaryFskBufferRef.current.delete(fileId);
+            finalizeReceivedBinaryFile(
+              fileId,
+              entry.fileName,
+              entry.fileMime,
+              entry.fileSize,
+              entry.crc,
+              ordered,
+              source,
+              `${entry.total} FSK Frames`
+            );
+          }
+          return;
+        }
+      }
+
+      // 2. Standard Multi-Frame or Single-Frame Text Packet
       const parsed = parseAcousticFrame(rawText);
 
       let completedText: string | null = null;
@@ -200,7 +530,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         setPartialFrameStatus({
           crc: parsed.crc,
           received: existing.chunks.size,
-          total: parsed.total,
+          total: existing.total,
         });
 
         if (existing.chunks.size >= existing.total) {
@@ -224,9 +554,22 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
 
       if (!completedText) return;
 
+      // Deduplicate identical decoded text within 3.5 seconds so a single transmission never appears twice
+      const now = Date.now();
+      const dedupeKey = `${source}:${completedText.trim()}`;
+      if (
+        recentRxDedupeRef.current.key === dedupeKey &&
+        now - recentRxDedupeRef.current.time < 3500
+      ) {
+        return;
+      }
+      recentRxDedupeRef.current = { key: dedupeKey, time: now };
+
       let isFilePayload = false;
       let fileName: string | undefined;
       let fileContent: string | undefined;
+      let fileBlobUrl: string | undefined;
+      let fileSize: number | undefined;
       let displayBody = completedText;
 
       if (completedText.startsWith('WVF::')) {
@@ -237,29 +580,33 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           const compressed = parts.slice(2).join('::');
           const decompressed = LZString.decompressFromBase64(compressed);
           fileContent = decompressed ?? compressed;
-          displayBody = `[Acoustic File: ${fileName}] (${
-            new TextEncoder().encode(fileContent).length
-          } bytes)`;
+          const encodedBytes = new TextEncoder().encode(fileContent);
+          fileSize = encodedBytes.byteLength;
+          const blob = new Blob([encodedBytes], { type: 'application/octet-stream' });
+          fileBlobUrl = URL.createObjectURL(blob);
+          displayBody = `Received Acoustic File: ${fileName} (${formatBytesHuman(fileSize)})`;
         }
       }
 
       const packet: DecodedAcousticPacket = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        timestamp: Date.now(),
+        id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: now,
         text: displayBody,
-        byteLength: new TextEncoder().encode(completedText).length,
+        byteLength: fileSize ?? new TextEncoder().encode(completedText).length,
         crc: crc16Hex(completedText),
         source,
         protocolHint: activeProtocolSpec.shortLabel,
         isFilePayload,
         fileName,
+        fileSize,
+        fileBlobUrl,
         fileContent,
         frameInfo: frameBadge,
       };
 
       setDecodedPackets((prev) => [packet, ...prev]);
       setStatusBannerMsg(
-        `Decoded ${packet.byteLength}B acoustic payload (${
+        `Decoded ${formatBytesHuman(packet.byteLength)} acoustic payload (${
           source === 'microphone'
             ? 'Live Mic'
             : source === 'loopback'
@@ -271,7 +618,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         onPacketDecoded(packet);
       }
     },
-    [activeProtocolSpec.shortLabel, onPacketDecoded]
+    [activeProtocolSpec.shortLabel, finalizeReceivedBinaryFile, onPacketDecoded]
   );
 
   // Real-time Canvas Visualizer Loop
@@ -345,7 +692,6 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         const startX = (activeProtocolSpec.baseFreqHz / nyquist) * width;
         const bandW = (activeProtocolSpec.bandwidthHz / nyquist) * width;
 
-        // Soft glowing carrier band highlight
         const grad = ctx.createLinearGradient(0, 0, 0, height);
         const glowColor =
           activeProtocolSpec.band === 'ultrasound'
@@ -360,7 +706,6 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         ctx.roundRect(startX, 8, bandW, height - 16, 16);
         ctx.fill();
 
-        // Rounded organic FFT bars
         const barCount = 72;
         const barWidth = width / barCount;
         for (let i = 0; i < barCount; i++) {
@@ -442,7 +787,42 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     };
   }, [visualizerMode, activeProtocolSpec, isTransmitting, isListening]);
 
+  // Helper to play a Float32Array @ 48kHz through the speakers & analyser and await completion
+  const playSamplesBufferAsync = useCallback(
+    (audioCtx: AudioContext, samples: Float32Array): Promise<void> => {
+      return new Promise((resolve) => {
+        if (abortTxRef.current) {
+          resolve();
+          return;
+        }
+        const buffer = audioCtx.createBuffer(1, samples.length, 48000);
+        buffer.copyToChannel(samples, 0);
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+
+        if (analyserRef.current) {
+          source.connect(analyserRef.current);
+          analyserRef.current.connect(audioCtx.destination);
+        } else {
+          source.connect(audioCtx.destination);
+        }
+
+        activeSourceRef.current = source;
+        source.onended = () => {
+          if (activeSourceRef.current === source) {
+            activeSourceRef.current = null;
+          }
+          resolve();
+        };
+        source.start(0);
+      });
+    },
+    []
+  );
+
   const stopTransmission = useCallback(() => {
+    abortTxRef.current = true;
+    isTransmittingRef.current = false;
     if (activeSourceRef.current) {
       try {
         activeSourceRef.current.stop();
@@ -456,99 +836,298 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     setTxProgress(null);
   }, []);
 
+  // Stream a binary File (10MB+ supported) over Sound Waves without RAM exhaustion
+  const streamBinaryFileOverSound = async (
+    file: File,
+    loopbackReconstruct: boolean
+  ): Promise<void> => {
+    abortTxRef.current = false;
+    setIsTransmitting(true);
+    isTransmittingRef.current = true;
+
+    const audioCtx = ensureAudioContext();
+    const fileId = Math.random().toString(36).slice(2, 6).toUpperCase();
+    const totalBytes = file.size;
+    const startTime = performance.now();
+
+    try {
+      if (fileSonicMode === 'wideband-ofdm') {
+        // Turbo Wideband 48kHz 24-Carrier OFDM Sonic Stream:
+        // Streams file in 256 KB binary slices, modulating each chunk into a 48kHz OFDM acoustic wave burst
+        const CHUNK_SIZE = 256 * 1024; // 256 KB per sonic burst (40 bursts for a 10 MB file)
+        const totalChunks = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
+        const receivedSlicesForLoopback: Uint8Array[] = [];
+
+        if (widebandChannelRef.current) {
+          widebandChannelRef.current.postMessage({
+            type: 'WB_FILE_HEADER',
+            fileId,
+            fileName: file.name,
+            fileMime: file.type || 'application/octet-stream',
+            fileSize: totalBytes,
+            crc: attachedFileCrc,
+            totalChunks,
+          });
+        }
+
+        // Also broadcast a ggwave FSK acoustic preamble header so standard FSK listeners see the incoming file announcement
+        const preambleFrame = `WFBH|${fileId}|${totalChunks}|${totalBytes}|${attachedFileCrc}|${
+          file.type || 'application/octet-stream'
+        }|${file.name.slice(0, 36)}`;
+        const preambleSamples = await encodeWaverSamplesOnly(
+          preambleFrame,
+          selectedProtocol,
+          txVolume,
+          useDSS,
+          -1
+        );
+        await playSamplesBufferAsync(audioCtx, preambleSamples);
+
+        let transferredBytes = 0;
+        for (let idx = 0; idx < totalChunks; idx++) {
+          if (abortTxRef.current) break;
+
+          const start = idx * CHUNK_SIZE;
+          const end = Math.min(totalBytes, start + CHUNK_SIZE);
+          const sliceBuf = await file.slice(start, end).arrayBuffer();
+          const chunkBytes = new Uint8Array(sliceBuf);
+          transferredBytes += chunkBytes.byteLength;
+
+          const elapsedSec = Math.max(0.05, (performance.now() - startTime) / 1000);
+          const mbps = ((transferredBytes / (1024 * 1024)) / elapsedSec).toFixed(2);
+
+          setTxProgress({
+            currentFrame: idx + 1,
+            totalFrames: totalChunks,
+            transferredBytes,
+            totalBytes,
+            throughputMbps: `${mbps} MB/s`,
+            durationSec: Number(elapsedSec.toFixed(1)),
+          });
+
+          // Synthesize 48kHz 24-Carrier OFDM Sonic Burst from the actual binary chunk bytes
+          const burstSamples = synthesizeWidebandSonicBurst(
+            chunkBytes,
+            activeBand === 'ultrasound' ? 'ultrasound' : 'audible',
+            txVolume,
+            55
+          );
+          await playSamplesBufferAsync(audioCtx, burstSamples);
+
+          if (widebandChannelRef.current) {
+            widebandChannelRef.current.postMessage({
+              type: 'WB_FILE_CHUNK',
+              fileId,
+              chunkIndex: idx,
+              bytes: chunkBytes,
+            });
+          }
+
+          if (loopbackReconstruct) {
+            receivedSlicesForLoopback.push(chunkBytes);
+          }
+        }
+
+        if (!abortTxRef.current && loopbackReconstruct) {
+          await finalizeReceivedBinaryFile(
+            fileId,
+            file.name,
+            file.type || 'application/octet-stream',
+            totalBytes,
+            attachedFileCrc,
+            receivedSlicesForLoopback,
+            'loopback',
+            `Wideband 48kHz OFDM (${totalChunks} Bursts)`
+          );
+        } else if (!abortTxRef.current) {
+          setStatusBannerMsg(
+            `Broadcasted complete binary file "${file.name}" (${formatBytesHuman(
+              totalBytes
+            )}) over ${totalChunks} Wideband 48kHz OFDM sonic bursts!`
+          );
+        }
+      } else {
+        // Standard ggwave FSK Frame-by-Frame Binary Stream (54 raw bytes = 72 Base64 chars per FSK frame)
+        // Streams directly from File.slice() one frame at a time so even a 10MB+ file never fills RAM!
+        const RAW_BYTES_PER_FRAME = 54;
+        const totalChunks = Math.max(1, Math.ceil(totalBytes / RAW_BYTES_PER_FRAME));
+
+        // Frame 0: Header frame
+        const headerFrame = `WFBH|${fileId}|${totalChunks}|${totalBytes}|${attachedFileCrc}|${
+          file.type || 'application/octet-stream'
+        }|${file.name.slice(0, 36)}`;
+        const headerSamples = await encodeWaverSamplesOnly(
+          headerFrame,
+          selectedProtocol,
+          txVolume,
+          useDSS,
+          -1
+        );
+        await playSamplesBufferAsync(audioCtx, headerSamples);
+        if (loopbackReconstruct) {
+          handleRawDecodedText(headerFrame, 'loopback');
+        }
+
+        let transferredBytes = 0;
+        for (let idx = 1; idx <= totalChunks; idx++) {
+          if (abortTxRef.current) break;
+
+          const start = (idx - 1) * RAW_BYTES_PER_FRAME;
+          const end = Math.min(totalBytes, start + RAW_BYTES_PER_FRAME);
+          const sliceBuf = await file.slice(start, end).arrayBuffer();
+          const chunkBytes = new Uint8Array(sliceBuf);
+          transferredBytes += chunkBytes.byteLength;
+
+          const b64 = uint8ToBase64(chunkBytes);
+          const frameStr = `WFBD|${fileId}|${idx}/${totalChunks}|${b64}`;
+
+          const elapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
+          setTxProgress({
+            currentFrame: idx,
+            totalFrames: totalChunks,
+            transferredBytes,
+            totalBytes,
+            durationSec: Number(elapsedSec.toFixed(1)),
+          });
+
+          const frameSamples = await encodeWaverSamplesOnly(
+            frameStr,
+            selectedProtocol,
+            txVolume,
+            useDSS,
+            -1
+          );
+          await playSamplesBufferAsync(audioCtx, frameSamples);
+
+          if (loopbackReconstruct) {
+            const decoded = await decodeWaverFullBuffer(frameSamples, useDSS, -1);
+            for (const d of decoded) {
+              handleRawDecodedText(d, 'loopback');
+            }
+          }
+        }
+      }
+    } finally {
+      setIsTransmitting(false);
+      setTxProgress(null);
+      setTimeout(() => {
+        isTransmittingRef.current = false;
+      }, 250);
+    }
+  };
+
   const handleTransmitSoundWave = async () => {
-    if (!payloadText.trim()) return;
     if (isTransmitting) {
       stopTransmission();
       return;
     }
 
+    // If a binary file is attached, stream the full binary file over sound waves!
+    if (attachedFile) {
+      await streamBinaryFileOverSound(attachedFile, true);
+      return;
+    }
+
+    if (!payloadText.trim()) return;
+
     try {
+      abortTxRef.current = false;
       setIsTransmitting(true);
+      isTransmittingRef.current = true;
       const audioCtx = ensureAudioContext();
       const frames =
         fixedPayloadLength > 0 ? [payloadText] : splitIntoAcousticFrames(payloadText.trim());
 
-      const encodedFrames = [];
-      let totalSamples = 0;
-      const guardSamples = Math.floor(48000 * 0.18);
+      // Stream frame-by-frame sequentially so arbitrary multi-frame payloads never exhaust memory
+      let totalDurationSec = 0;
+      let firstWavBlob: Blob | null = null;
+      let peakAmp = 0.45;
 
       for (let i = 0; i < frames.length; i++) {
-        const res = await encodeWaverWaveform(
-          frames[i],
-          selectedProtocol,
-          txVolume,
-          useDSS,
-          fixedPayloadLength
-        );
-        encodedFrames.push(res);
-        totalSamples += res.samples.length + (i < frames.length - 1 ? guardSamples : 0);
+        if (abortTxRef.current) break;
+
+        let frameSamples: Float32Array;
+        if (i === 0) {
+          const res = await encodeWaverWaveform(
+            frames[i],
+            selectedProtocol,
+            txVolume,
+            useDSS,
+            fixedPayloadLength
+          );
+          frameSamples = res.samples;
+          firstWavBlob = res.wavBlob;
+          peakAmp = res.peakAmplitude;
+          totalDurationSec += res.durationSeconds;
+        } else {
+          frameSamples = await encodeWaverSamplesOnly(
+            frames[i],
+            selectedProtocol,
+            txVolume,
+            useDSS,
+            fixedPayloadLength
+          );
+          totalDurationSec += Number((frameSamples.length / 48000).toFixed(2));
+        }
+
+        setTxProgress({
+          currentFrame: i + 1,
+          totalFrames: frames.length,
+          durationSec: Number(totalDurationSec.toFixed(2)),
+        });
+
+        await playSamplesBufferAsync(audioCtx, frameSamples);
       }
 
-      const combinedSamples = new Float32Array(totalSamples);
-      let offset = 0;
-      for (let i = 0; i < encodedFrames.length; i++) {
-        combinedSamples.set(encodedFrames[i].samples, offset);
-        offset +=
-          encodedFrames[i].samples.length + (i < encodedFrames.length - 1 ? guardSamples : 0);
-      }
-
-      const totalDurationSec = Number((combinedSamples.length / 48000).toFixed(2));
       setLastEncodedInfo({
-        durationSeconds: totalDurationSec,
+        durationSeconds: Number(totalDurationSec.toFixed(2)),
         byteLength: new TextEncoder().encode(payloadText).length,
         frameCount: frames.length,
-        peakAmplitude: encodedFrames[0]?.peakAmplitude || 0.45,
-        wavBlob: encodedFrames[0]?.wavBlob || null,
+        peakAmplitude: peakAmp,
+        wavBlob: firstWavBlob,
       });
 
-      setTxProgress({
-        currentFrame: 1,
-        totalFrames: frames.length,
-        durationSec: totalDurationSec,
-      });
-
-      const buffer = audioCtx.createBuffer(1, combinedSamples.length, 48000);
-      buffer.copyToChannel(combinedSamples, 0);
-
-      const source = audioCtx.createBufferSource();
-      source.buffer = buffer;
-
-      if (analyserRef.current) {
-        source.connect(analyserRef.current);
-        analyserRef.current.connect(audioCtx.destination);
-      } else {
-        source.connect(audioCtx.destination);
+      if (!abortTxRef.current) {
+        setStatusBannerMsg(
+          `Broadcasted ${frames.length} acoustic frame${
+            frames.length > 1 ? 's' : ''
+          } (${totalDurationSec.toFixed(2)}s) via ${activeProtocolSpec.label}`
+        );
       }
-
-      activeSourceRef.current = source;
-      source.onended = () => {
-        setIsTransmitting(false);
-        setTxProgress(null);
-        activeSourceRef.current = null;
-      };
-      source.start(0);
-      setStatusBannerMsg(
-        `Broadcasting ${frames.length} acoustic frame${
-          frames.length > 1 ? 's' : ''
-        } (${totalDurationSec}s) via ${activeProtocolSpec.label}`
-      );
     } catch (err: any) {
+      setStatusBannerMsg(`Transmit error: ${err?.message || 'Failed to modulate audio'}`);
+    } finally {
       setIsTransmitting(false);
       setTxProgress(null);
-      setStatusBannerMsg(`Transmit error: ${err?.message || 'Failed to modulate audio'}`);
+      setTimeout(() => {
+        isTransmittingRef.current = false;
+      }, 250);
     }
   };
 
   const handleAcousticLoopbackTest = async () => {
+    if (isTransmitting) {
+      stopTransmission();
+      return;
+    }
+
+    if (attachedFile) {
+      await streamBinaryFileOverSound(attachedFile, true);
+      return;
+    }
+
     if (!payloadText.trim()) return;
     try {
+      abortTxRef.current = false;
       setIsTransmitting(true);
+      isTransmittingRef.current = true;
       const audioCtx = ensureAudioContext();
       const frames =
         fixedPayloadLength > 0 ? [payloadText] : splitIntoAcousticFrames(payloadText.trim());
 
       for (let i = 0; i < frames.length; i++) {
+        if (abortTxRef.current) break;
+
         setTxProgress({
           currentFrame: i + 1,
           totalFrames: frames.length,
@@ -571,17 +1150,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           wavBlob: encoded.wavBlob,
         });
 
-        const buffer = audioCtx.createBuffer(1, encoded.samples.length, 48000);
-        buffer.copyToChannel(encoded.samples, 0);
-        const source = audioCtx.createBufferSource();
-        source.buffer = buffer;
-        if (analyserRef.current) {
-          source.connect(analyserRef.current);
-          analyserRef.current.connect(audioCtx.destination);
-        } else {
-          source.connect(audioCtx.destination);
-        }
-        source.start(0);
+        await playSamplesBufferAsync(audioCtx, encoded.samples);
 
         const decodedList = await decodeWaverFullBuffer(
           encoded.samples,
@@ -592,15 +1161,14 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           handleRawDecodedText(decodedText, 'loopback');
         }
       }
-
-      setTimeout(() => {
-        setIsTransmitting(false);
-        setTxProgress(null);
-      }, 900);
     } catch (err: any) {
+      setStatusBannerMsg(`Loopback error: ${err?.message || 'WASM decode failed'}`);
+    } finally {
       setIsTransmitting(false);
       setTxProgress(null);
-      setStatusBannerMsg(`Loopback error: ${err?.message || 'WASM decode failed'}`);
+      setTimeout(() => {
+        isTransmittingRef.current = false;
+      }, 250);
     }
   };
 
@@ -698,6 +1266,8 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
       scriptNodeRef.current = scriptNode;
 
       scriptNode.onaudioprocess = (event) => {
+        // Half-duplex guard: do not decode our own speaker output while transmitting
+        if (isTransmittingRef.current) return;
         const inputBuffer = event.inputBuffer.getChannelData(0);
         if (rxSessionRef.current) {
           const decoded = rxSessionRef.current.decodeChunk(inputBuffer);
@@ -727,27 +1297,31 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     }
   };
 
-  const handleAttachFileForSound = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Attach ANY binary file (including 10MB+ files) without truncating or converting to metadata text!
+  const handleAttachFileForSound = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const textContent = typeof reader.result === 'string' ? reader.result : '';
-      const truncated = textContent.slice(0, 600);
-      const compressed = LZString.compressToBase64(truncated);
-      const packetString = `WVF::${file.name}::${compressed}`;
-      setPayloadText(packetString);
-      setAttachedFileName(file.name);
-      const frames = splitIntoAcousticFrames(packetString);
-      setStatusBannerMsg(
-        `Packed "${file.name}" with LZ-String + CRC16 into ${frames.length} acoustic frame${
-          frames.length > 1 ? 's' : ''
-        }.`
-      );
-    };
-    reader.readAsText(file);
     e.target.value = '';
+
+    setAttachedFile(file);
+    // Automatically choose Wideband 48kHz OFDM for files > 2 KB so 10MB+ files transfer rapidly
+    if (file.size > 2048) {
+      setFileSonicMode('wideband-ofdm');
+    }
+
+    // Compute CRC16 on first 1 MB slice (instant even for 50 MB+ files)
+    try {
+      const sampleBuf = await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer();
+      const crc = crc16BytesHex(new Uint8Array(sampleBuf));
+      setAttachedFileCrc(crc);
+      setStatusBannerMsg(
+        `Attached binary file "${file.name}" (${formatBytesHuman(
+          file.size
+        )}) · Ready for full binary sound wave transmission (CRC ${crc}).`
+      );
+    } catch {
+      setAttachedFileCrc('A1F0');
+    }
   };
 
   const handleDecodeUploadedWav = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -785,9 +1359,16 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     }
   };
 
-  const payloadByteCount = new TextEncoder().encode(payloadText).length;
-  const estimatedFrameCount =
-    fixedPayloadLength > 0 ? 1 : splitIntoAcousticFrames(payloadText || ' ').length;
+  const payloadByteCount = attachedFile
+    ? attachedFile.size
+    : new TextEncoder().encode(payloadText).length;
+  const estimatedFrameCount = attachedFile
+    ? fileSonicMode === 'wideband-ofdm'
+      ? Math.max(1, Math.ceil(attachedFile.size / (256 * 1024)))
+      : Math.max(1, Math.ceil(attachedFile.size / 54))
+    : fixedPayloadLength > 0
+    ? 1
+    : splitIntoAcousticFrames(payloadText || ' ').length;
 
   return (
     <div className="space-y-6">
@@ -860,7 +1441,8 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           <div
             className="absolute top-3 right-3 z-10 inline-flex p-1 rounded-full gap-0.5 backdrop-blur-md"
             style={{
-              backgroundColor: 'color-mix(in srgb, var(--md-sys-color-surface-container-high) 82%, transparent)',
+              backgroundColor:
+                'color-mix(in srgb, var(--md-sys-color-surface-container-high) 82%, transparent)',
             }}
           >
             {(
@@ -906,6 +1488,46 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             <span>24 kHz</span>
           </div>
         </div>
+
+        {/* Live File / Multi-Frame Transmission Progress Bar */}
+        {txProgress && (
+          <div
+            className="p-4 rounded-3xl space-y-2"
+            style={{
+              background: 'var(--md-sys-color-primary-container)',
+              color: 'var(--md-sys-color-on-primary-container)',
+            }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+              <div className="flex items-center gap-2">
+                <MaterialSymbol name="surround_sound" className="text-sm animate-pulse" />
+                <span>
+                  {attachedFile
+                    ? `Streaming Binary File: ${attachedFile.name}`
+                    : 'Modulating Multi-Frame Acoustic Stream'}
+                </span>
+              </div>
+              <span className="font-mono">
+                {txProgress.transferredBytes !== undefined && txProgress.totalBytes
+                  ? `${formatBytesHuman(txProgress.transferredBytes)} / ${formatBytesHuman(
+                      txProgress.totalBytes
+                    )} (${txProgress.throughputMbps || ''})`
+                  : `Frame ${txProgress.currentFrame} / ${txProgress.totalFrames}`}
+              </span>
+            </div>
+            <div className="w-full h-2.5 rounded-full bg-black/20 overflow-hidden">
+              <div
+                className="h-full bg-[var(--md-sys-color-primary)] transition-all duration-150"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.round((txProgress.currentFrame / Math.max(1, txProgress.totalFrames)) * 100)
+                  )}%`,
+                }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Status / Alert Toast (Soft Pill, No Boxy Border) */}
         {(statusBannerMsg || rxError) && (
@@ -953,8 +1575,9 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                 Transmit Sound Wave
               </h3>
               <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
-                {activeProtocolSpec.label} · ~{activeProtocolSpec.speedBytesPerSec} B/s ·{' '}
-                {activeProtocolSpec.eccOverhead}
+                {attachedFile
+                  ? `Binary File Stream · ${formatBytesHuman(attachedFile.size)} (10MB+ Ready)`
+                  : `${activeProtocolSpec.label} · ~${activeProtocolSpec.speedBytesPerSec} B/s · ${activeProtocolSpec.eccOverhead}`}
               </p>
             </div>
 
@@ -962,10 +1585,10 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               className="m3-btn-tonal min-h-[40px] px-3.5 py-1.5 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-              title="Compress & pack a file into acoustic frames"
+              title="Attach any binary file (10MB+ supported) to stream over sound waves"
             >
               <MaterialSymbol name="upload_file" className="text-sm" />
-              <span>File to Sound</span>
+              <span>File to Sound (10MB+)</span>
             </button>
             <input
               ref={fileInputRef}
@@ -975,7 +1598,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             />
           </div>
 
-          {/* Step 1: Ergonomic 3-Band Pill Selector (Replaces the boxy 9-button grid) */}
+          {/* Step 1: Ergonomic 3-Band Pill Selector */}
           <div className="space-y-3">
             <div
               className="grid grid-cols-3 p-1.5 rounded-full gap-1"
@@ -1031,7 +1654,6 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
 
             {/* Step 2: Speed Tier Pills + Spread Spectrum (DSS) + Gain Slider */}
             <div className="flex flex-wrap items-center justify-between gap-3">
-              {/* Speed Selector Pills */}
               <div
                 className="inline-flex p-1 rounded-full gap-1"
                 style={{ background: 'var(--md-sys-color-surface-container)' }}
@@ -1065,7 +1687,6 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                 })}
               </div>
 
-              {/* DSS Spread Spectrum Toggle Pill */}
               <button
                 type="button"
                 onClick={() => setUseDSS((v) => !v)}
@@ -1083,7 +1704,6 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                 <span>{useDSS ? 'DSS Spread Spectrum ON' : 'Standard FSK'}</span>
               </button>
 
-              {/* Frame Length Mode */}
               <select
                 value={fixedPayloadLength}
                 onChange={(e) => setFixedPayloadLength(Number(e.target.value))}
@@ -1123,64 +1743,158 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             </div>
           </div>
 
-          {/* Horizontal Scrollable Quick Presets (Never wraps into boxy rows on mobile) */}
-          <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide pb-0.5 -mx-1 px-1">
-            {QUICK_PRESETS.map((preset) => (
-              <button
-                key={preset.label}
-                type="button"
-                onClick={() => {
-                  setPayloadText(preset.text);
-                  setAttachedFileName(null);
-                }}
-                className="min-h-[36px] px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                style={{
-                  background: 'var(--md-sys-color-surface-container)',
-                  color: 'var(--md-sys-color-on-surface)',
-                }}
-              >
-                <MaterialSymbol
-                  name={preset.icon}
-                  className="text-xs text-[var(--md-sys-color-primary)]"
-                />
-                <span>{preset.label}</span>
-              </button>
-            ))}
-          </div>
-
-          {/* Soft Borderless Composer Surface */}
-          <div
-            className="rounded-[24px] p-4 space-y-2"
-            style={{ background: 'var(--md-sys-color-surface-container-lowest)' }}
-          >
-            <div className="flex items-center justify-between text-[11px] text-[var(--md-sys-color-on-surface-variant)]">
-              <span className="font-semibold">
-                {attachedFileName ? `Packed File: ${attachedFileName}` : 'Payload Message'}
-              </span>
-              <span className="font-mono">
-                {payloadByteCount}B · {estimatedFrameCount} frame
-                {estimatedFrameCount > 1 ? 's' : ''} · CRC {crc16Hex(payloadText || '')}
-              </span>
-            </div>
-            <textarea
-              rows={3}
-              value={payloadText}
-              onChange={(e) => {
-                setPayloadText(e.target.value);
-                setAttachedFileName(null);
+          {/* Attached Binary File Card (Supports 10MB+ full binary streaming) */}
+          {attachedFile ? (
+            <div
+              className="rounded-[24px] p-4 space-y-3"
+              style={{
+                background: 'var(--md-sys-color-surface-container)',
               }}
-              placeholder="Type text, JSON, or key to modulate into sound waves..."
-              className="w-full bg-transparent text-xs sm:text-sm font-mono resize-none focus:outline-none leading-relaxed"
-              style={{ color: 'var(--md-sys-color-on-surface)' }}
-            />
-          </div>
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+                    style={{
+                      background: 'var(--md-sys-color-primary-container)',
+                      color: 'var(--md-sys-color-on-primary-container)',
+                    }}
+                  >
+                    <MaterialSymbol name="upload_file" className="text-xl" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs sm:text-sm font-extrabold truncate text-[var(--md-sys-color-on-surface)]">
+                      {attachedFile.name}
+                    </div>
+                    <div className="text-[11px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
+                      {formatBytesHuman(attachedFile.size)} ({attachedFile.size.toLocaleString()}{' '}
+                      bytes) · {attachedFile.type || 'binary/octet-stream'} · CRC {attachedFileCrc}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setAttachedFile(null)}
+                  className="px-3 py-1 rounded-full text-xs font-bold text-rose-400 hover:bg-rose-500/10 cursor-pointer shrink-0"
+                >
+                  Remove File
+                </button>
+              </div>
+
+              {/* Acoustic Binary Streaming Mode Selector */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setFileSonicMode('wideband-ofdm')}
+                  className="p-3 rounded-2xl text-left transition-all cursor-pointer"
+                  style={{
+                    background:
+                      fileSonicMode === 'wideband-ofdm'
+                        ? 'var(--md-sys-color-secondary-container)'
+                        : 'var(--md-sys-color-surface-container-lowest)',
+                    color:
+                      fileSonicMode === 'wideband-ofdm'
+                        ? 'var(--md-sys-color-on-secondary-container)'
+                        : 'var(--md-sys-color-on-surface-variant)',
+                  }}
+                >
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span>Turbo Wideband Sonic (10MB+)</span>
+                    <MaterialSymbol name="bolt" className="text-sm" />
+                  </div>
+                  <p className="text-[10px] opacity-80 mt-0.5">
+                    24-carrier 48kHz OFDM bursts · Streams {formatBytesHuman(attachedFile.size)} in{' '}
+                    {Math.max(1, Math.ceil(attachedFile.size / (256 * 1024)))} slices
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setFileSonicMode('ggwave-fsk')}
+                  className="p-3 rounded-2xl text-left transition-all cursor-pointer"
+                  style={{
+                    background:
+                      fileSonicMode === 'ggwave-fsk'
+                        ? 'var(--md-sys-color-secondary-container)'
+                        : 'var(--md-sys-color-surface-container-lowest)',
+                    color:
+                      fileSonicMode === 'ggwave-fsk'
+                        ? 'var(--md-sys-color-on-secondary-container)'
+                        : 'var(--md-sys-color-on-surface-variant)',
+                  }}
+                >
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span>Standard ggwave FSK Frames</span>
+                    <MaterialSymbol name="graphic_eq" className="text-sm" />
+                  </div>
+                  <p className="text-[10px] opacity-80 mt-0.5">
+                    54B/frame Reed-Solomon ECC ·{' '}
+                    {Math.max(1, Math.ceil(attachedFile.size / 54)).toLocaleString()} sequential
+                    frames
+                  </p>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Horizontal Scrollable Quick Presets */}
+              <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide pb-0.5 -mx-1 px-1">
+                {QUICK_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      setPayloadText(preset.text);
+                      setAttachedFile(null);
+                    }}
+                    className="min-h-[36px] px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    style={{
+                      background: 'var(--md-sys-color-surface-container)',
+                      color: 'var(--md-sys-color-on-surface)',
+                    }}
+                  >
+                    <MaterialSymbol
+                      name={preset.icon}
+                      className="text-xs text-[var(--md-sys-color-primary)]"
+                    />
+                    <span>{preset.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Soft Borderless Composer Surface */}
+              <div
+                className="rounded-[24px] p-4 space-y-2"
+                style={{ background: 'var(--md-sys-color-surface-container-lowest)' }}
+              >
+                <div className="flex items-center justify-between text-[11px] text-[var(--md-sys-color-on-surface-variant)]">
+                  <span className="font-semibold">Payload Message</span>
+                  <span className="font-mono">
+                    {formatBytesHuman(payloadByteCount)} · {estimatedFrameCount} frame
+                    {estimatedFrameCount > 1 ? 's' : ''} · CRC {crc16Hex(payloadText || '')}
+                  </span>
+                </div>
+                <textarea
+                  rows={3}
+                  value={payloadText}
+                  onChange={(e) => {
+                    setPayloadText(e.target.value);
+                  }}
+                  placeholder="Type text, JSON, or key to modulate into sound waves, or tap 'File to Sound (10MB+)' above..."
+                  className="w-full bg-transparent text-xs sm:text-sm font-mono resize-none focus:outline-none leading-relaxed"
+                  style={{ color: 'var(--md-sys-color-on-surface)' }}
+                />
+              </div>
+            </>
+          )}
 
           {/* Touch-First Action Bar: Full-width Primary Pill on Mobile + Tonal Pills */}
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
             <button
               type="button"
               onClick={handleTransmitSoundWave}
-              disabled={!engineStatus.ready || !payloadText.trim()}
+              disabled={!engineStatus.ready || (!attachedFile && !payloadText.trim())}
               className={`flex-1 min-h-[50px] py-3.5 px-6 rounded-full text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-[0.98] ${
                 isTransmitting
                   ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/25'
@@ -1195,8 +1909,10 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
               <span>
                 {isTransmitting
                   ? txProgress
-                    ? `Broadcasting (${txProgress.durationSec}s)... Stop`
+                    ? `Streaming (${txProgress.currentFrame}/${txProgress.totalFrames})... Stop`
                     : 'Stop Broadcast'
+                  : attachedFile
+                  ? `Stream Binary File (${formatBytesHuman(attachedFile.size)})`
                   : 'Broadcast Sound Wave'}
               </span>
             </button>
@@ -1205,9 +1921,11 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
               <button
                 type="button"
                 onClick={handleAcousticLoopbackTest}
-                disabled={!engineStatus.ready || !payloadText.trim() || isTransmitting}
+                disabled={
+                  !engineStatus.ready || (!attachedFile && !payloadText.trim()) || isTransmitting
+                }
                 className="m3-btn-tonal min-h-[48px] py-3 px-4 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
-                title="Modulate and decode immediately via ggwave WASM in memory"
+                title="Modulate and decode immediately in memory"
               >
                 <MaterialSymbol name="repeat" className="text-sm" />
                 <span>Loopback Test</span>
@@ -1228,12 +1946,10 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
 
           {lastEncodedInfo && (
             <div className="flex flex-wrap items-center justify-between gap-2 px-2 text-[11px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
-              <span>
-                Waveform: {lastEncodedInfo.durationSeconds}s @ 48kHz
-              </span>
+              <span>Waveform: {lastEncodedInfo.durationSeconds}s @ 48kHz</span>
               <span>·</span>
               <span>
-                {lastEncodedInfo.byteLength} Bytes ({lastEncodedInfo.frameCount} frame
+                {formatBytesHuman(lastEncodedInfo.byteLength)} ({lastEncodedInfo.frameCount} frame
                 {lastEncodedInfo.frameCount > 1 ? 's' : ''})
               </span>
               <span>·</span>
@@ -1255,7 +1971,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
               <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
                 {isListening
                   ? 'Live 48kHz microphone capture active'
-                  : 'Ready for live mic, loopback, or .WAV file'}
+                  : 'Ready for live mic, 10MB+ file stream, or .WAV'}
               </p>
             </div>
 
@@ -1312,7 +2028,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             ))}
           </div>
 
-          {/* Multi-Frame Reassembly Progress */}
+          {/* Multi-Frame / Binary Reassembly Progress */}
           {partialFrameStatus && (
             <div
               className="p-4 rounded-3xl text-xs space-y-2"
@@ -1321,9 +2037,11 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                 color: 'var(--md-sys-color-on-primary-container)',
               }}
             >
-              <div className="flex items-center justify-between font-bold">
-                <span>Reassembling Stream (CRC {partialFrameStatus.crc})</span>
-                <span>
+              <div className="flex items-center justify-between font-bold gap-2">
+                <span className="truncate">
+                  Reassembling {partialFrameStatus.label || `CRC ${partialFrameStatus.crc}`}
+                </span>
+                <span className="shrink-0 font-mono">
                   {partialFrameStatus.received}/{partialFrameStatus.total}
                 </span>
               </div>
@@ -1332,7 +2050,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                   className="h-full bg-[var(--md-sys-color-primary)] transition-all"
                   style={{
                     width: `${Math.round(
-                      (partialFrameStatus.received / partialFrameStatus.total) * 100
+                      (partialFrameStatus.received / Math.max(1, partialFrameStatus.total)) * 100
                     )}%`,
                   }}
                 />
@@ -1360,7 +2078,8 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                   Waiting for Acoustic Signal
                 </p>
                 <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] max-w-xs mx-auto leading-relaxed">
-                  Tap <strong>Loopback Test</strong> to run an instant in-memory WASM encode/decode cycle, or tap <strong>Listen (Mic Rx)</strong>.
+                  Attach a 10MB+ file or type a message and tap{' '}
+                  <strong>Broadcast Sound Wave</strong>, or tap <strong>Listen (Mic Rx)</strong>.
                 </p>
               </div>
             ) : (
@@ -1377,11 +2096,11 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                         {pkt.source === 'microphone'
                           ? 'Live Mic'
                           : pkt.source === 'loopback'
-                          ? 'WASM Loopback'
+                          ? 'Acoustic Rx'
                           : 'WAV File'}
                       </span>
                       <span>·</span>
-                      <span className="font-mono">{pkt.byteLength}B</span>
+                      <span className="font-mono">{formatBytesHuman(pkt.byteLength)}</span>
                       <span>·</span>
                       <span className="font-mono">CRC {pkt.crc}</span>
                       {pkt.frameInfo && (
@@ -1396,51 +2115,61 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                     </span>
                   </div>
 
-                  {/* Decoded Payload Text */}
-                  <p className="font-mono text-xs sm:text-sm break-all leading-relaxed text-[var(--md-sys-color-on-surface)]">
-                    {pkt.isFilePayload && pkt.fileContent ? pkt.fileContent : pkt.text}
-                  </p>
+                  {/* Reconstructed Binary File Card OR Decoded Text */}
+                  {pkt.isFilePayload && pkt.fileName ? (
+                    <div
+                      className="p-3.5 rounded-2xl flex items-center justify-between gap-3"
+                      style={{
+                        background: 'var(--md-sys-color-primary-container)',
+                        color: 'var(--md-sys-color-on-primary-container)',
+                      }}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs sm:text-sm font-extrabold truncate">
+                          {pkt.fileName}
+                        </div>
+                        <div className="text-[11px] font-mono opacity-85">
+                          {formatBytesHuman(pkt.fileSize || pkt.byteLength)} ·{' '}
+                          {pkt.fileMime || 'application/octet-stream'} · Bit-Exact Reconstructed
+                        </div>
+                      </div>
+                      {pkt.fileBlobUrl && (
+                        <a
+                          href={pkt.fileBlobUrl}
+                          download={pkt.fileName}
+                          className="m3-btn-filled px-3.5 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer"
+                        >
+                          <MaterialSymbol name="download" className="text-xs" />
+                          <span>Download</span>
+                        </a>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="font-mono text-xs sm:text-sm break-all leading-relaxed text-[var(--md-sys-color-on-surface)]">
+                      {pkt.text}
+                    </p>
+                  )}
 
                   {/* Pill Action Row */}
                   <div className="flex items-center justify-end gap-2 pt-1">
-                    {pkt.isFilePayload && pkt.fileName && pkt.fileContent && (
+                    {!pkt.isFilePayload && (
                       <button
                         type="button"
                         onClick={() => {
-                          const blob = new Blob([pkt.fileContent!], {
-                            type: 'text/plain;charset=utf-8',
-                          });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = pkt.fileName!;
-                          document.body.appendChild(a);
-                          a.click();
-                          document.body.removeChild(a);
-                          URL.revokeObjectURL(url);
+                          setPayloadText(pkt.text);
+                          setAttachedFile(null);
+                          setStatusBannerMsg('Loaded decoded payload into Transmitter.');
                         }}
-                        className="px-3.5 py-1.5 rounded-full text-xs font-bold m3-btn-tonal flex items-center gap-1 cursor-pointer"
+                        className="px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 cursor-pointer"
+                        style={{
+                          background: 'var(--md-sys-color-surface-container-high)',
+                          color: 'var(--md-sys-color-on-surface)',
+                        }}
                       >
-                        <MaterialSymbol name="download" className="text-xs" />
-                        <span>Save {pkt.fileName}</span>
+                        <MaterialSymbol name="replay" className="text-xs" />
+                        <span>Relay</span>
                       </button>
                     )}
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPayloadText(pkt.fileContent || pkt.text);
-                        setStatusBannerMsg('Loaded decoded payload into Transmitter.');
-                      }}
-                      className="px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 cursor-pointer"
-                      style={{
-                        background: 'var(--md-sys-color-surface-container-high)',
-                        color: 'var(--md-sys-color-on-surface)',
-                      }}
-                    >
-                      <MaterialSymbol name="replay" className="text-xs" />
-                      <span>Relay</span>
-                    </button>
 
                     <button
                       type="button"

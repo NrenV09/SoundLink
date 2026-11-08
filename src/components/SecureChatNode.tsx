@@ -14,6 +14,7 @@ import {
   uint8ToBase64,
   base64ToUint8,
   sanitizeAcousticFileName,
+  prepareOverTheAirFilePayload,
   storeInAcousticBinaryVault,
   retrieveFromAcousticBinaryVault,
 } from '../lib/waverEngine';
@@ -318,7 +319,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     }
   };
 
-  // Stream a 10MB+ binary file directly inside Sonic Chat using 1-indexed real ggwave WASM waves (Wave 1 = 1/N)
+  // Stream a binary file directly inside Sonic Chat using 1-indexed real ggwave WASM waves (Wave 1 = 1/N)
   const handleAttachBinaryFileInChat = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -331,26 +332,33 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
 
       const sampleSlice = await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer();
       const crc = crc16BytesHex(new Uint8Array(sampleSlice));
-      const fileId = Math.random().toString(36).slice(2, 6).toUpperCase();
+      const fileId = Math.random().toString(36).slice(2, 5).toUpperCase();
       sentFileIdsRef.current.add(fileId);
-      const safeName = sanitizeAcousticFileName(file.name, 18);
+      const safeName = sanitizeAcousticFileName(file.name, 14);
       const resolvedMime = file.type || guessMimeFromName(file.name);
 
       await storeInAcousticBinaryVault(fileId, file, file.name, resolvedMime, crc);
 
-      const CHUNK_SIZE = Math.max(256 * 1024, Math.ceil(file.size / 6));
-      const totalWaves = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+      const prepared = await prepareOverTheAirFilePayload(file, 'turbo');
+      const { otaBytes, flag, bytesPerWave, totalWaves } = prepared;
+      const RAW_VAULT_SLICE = Math.max(1, Math.ceil(file.size / totalWaves));
+
       const fastProtocol: WaverProtocolKey = selectedProtocol.startsWith('ULTRASOUND')
         ? 'ULTRASOUND_FASTEST'
         : 'AUDIBLE_FASTEST';
 
       let transferredBytes = 0;
       for (let waveIdx = 1; waveIdx <= totalWaves; waveIdx++) {
-        const start = (waveIdx - 1) * CHUNK_SIZE;
-        const end = Math.min(file.size, start + CHUNK_SIZE);
-        const sliceBuf = await file.slice(start, end).arrayBuffer();
+        const rawStart = (waveIdx - 1) * RAW_VAULT_SLICE;
+        const rawEnd = Math.min(file.size, rawStart + RAW_VAULT_SLICE);
+        const sliceBuf = await file.slice(rawStart, rawEnd).arrayBuffer();
         const chunkBytes = new Uint8Array(sliceBuf);
-        transferredBytes += chunkBytes.byteLength;
+        transferredBytes = Math.min(file.size, transferredBytes + chunkBytes.byteLength);
+
+        const otaStart = (waveIdx - 1) * bytesPerWave;
+        const otaEnd = Math.min(otaBytes.byteLength, otaStart + bytesPerWave);
+        const otaSlice = otaBytes.subarray(otaStart, otaEnd);
+        const b64 = uint8ToBase64(otaSlice);
 
         setFileStreamProgress({
           fileName: file.name,
@@ -360,7 +368,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           totalBytes: file.size,
         });
 
-        if (widebandChannelRef.current) {
+        if (widebandChannelRef.current && chunkBytes.byteLength > 0) {
           widebandChannelRef.current.postMessage({
             type: 'WB_WAVE_SLICE',
             fileId,
@@ -374,10 +382,11 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           });
         }
 
-        const b64Head = uint8ToBase64(chunkBytes.subarray(0, Math.min(36, chunkBytes.byteLength)));
-        const turboFrameStr = `WBT|${fileId}|${waveIdx}/${totalWaves}|${file.size}|${crc}|${safeName}|${b64Head}`;
+        // Compact 1-Indexed Frame: W1|<id3>|<waveIdx>/<totalWaves>|<flag>|<safeName14>|<b64_up_to_104_chars>
+        // Total length <= 135 bytes (never truncated!)
+        const frameStr = `W1|${fileId}|${waveIdx}/${totalWaves}|${flag}|${safeName}|${b64}`;
         const waveSamples = await encodeWaverSamplesOnly(
-          turboFrameStr,
+          frameStr,
           fastProtocol,
           txVolume,
           false,
@@ -454,9 +463,14 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
     async (cleanText: string) => {
       if (!onIncomingAcousticMessage) return;
 
-      // Check if incoming acoustic frame is a 1-indexed file wave (WBT| or WBF|)
-      if (cleanText.startsWith('WBT|') || cleanText.startsWith('WBF|')) {
-        const isTurbo = cleanText.startsWith('WBT|');
+      // Check if incoming acoustic frame is a 1-indexed file wave (W1|, WBT|, or WBF|)
+      if (
+        cleanText.startsWith('W1|') ||
+        cleanText.startsWith('WBT|') ||
+        cleanText.startsWith('WBF|')
+      ) {
+        const isW1 = cleanText.startsWith('W1|');
+        const isTurbo = isW1 || cleanText.startsWith('WBT|');
         const parts = cleanText.split('|');
         if (parts.length >= 6) {
           const fileId = parts[1];
@@ -467,11 +481,16 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           const total = Math.max(1, parseInt(totalStr, 10) || 1);
 
           let fileSize = 0;
-          let crc = '0000';
+          let crc = fileId;
           let fileName = `acoustic-${fileId}.bin`;
           let b64Slice = '';
+          let flag = 'R';
 
-          if (isTurbo && parts.length >= 7) {
+          if (isW1) {
+            flag = parts[3] || 'R';
+            fileName = parts[4] || `acoustic-${fileId}.bin`;
+            b64Slice = parts.slice(5).join('|');
+          } else if (cleanText.startsWith('WBT|') && parts.length >= 7) {
             fileSize = parseInt(parts[3], 10) || 0;
             crc = parts[4];
             fileName = parts[5];
@@ -482,32 +501,32 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
             b64Slice = parts.slice(5).join('|');
           }
 
-          let sliceBytes = new Uint8Array(0);
-          try {
-            if (b64Slice) sliceBytes = base64ToUint8(b64Slice);
-          } catch {
-            // Ignore
-          }
+          const sliceBytes = b64Slice ? base64ToUint8(b64Slice) : new Uint8Array(0);
 
           const entry = widebandRxBufferRef.current.get(fileId) || {
             fileName,
-            fileMime: guessMimeFromName(fileName),
-            fileSize: fileSize || sliceBytes.byteLength * total,
+            fileMime: flag === 'I' ? 'image/webp' : guessMimeFromName(fileName),
+            fileSize: fileSize || Math.max(sliceBytes.byteLength * total, sliceBytes.byteLength),
             crc,
             totalWaves: total,
             receivedBytes: 0,
             chunks: new Map<number, Uint8Array>(),
           };
 
-          if (!entry.chunks.has(idx)) {
+          if (sliceBytes.byteLength > 0 && !entry.chunks.has(idx)) {
             entry.chunks.set(idx, sliceBytes);
             entry.receivedBytes += sliceBytes.byteLength;
+          } else if (!entry.chunks.has(idx)) {
+            entry.chunks.set(idx, sliceBytes);
           }
+          entry.fileSize = Math.max(entry.fileSize, entry.receivedBytes);
           widebandRxBufferRef.current.set(fileId, entry);
 
-          const receivedCount = isTurbo ? Math.max(idx, entry.chunks.size) : entry.chunks.size;
+          const receivedCount = Math.max(idx, entry.chunks.size);
           setStatusNote(
-            `Receiving "${entry.fileName}" — Wave ${receivedCount}/${entry.totalWaves}...`
+            `Receiving "${entry.fileName}" — Wave ${receivedCount}/${
+              entry.totalWaves
+            } (${formatBytesHuman(entry.receivedBytes)})...`
           );
 
           if (entry.chunks.size >= entry.totalWaves || (isTurbo && idx >= entry.totalWaves)) {
@@ -515,7 +534,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
             widebandRxBufferRef.current.delete(fileId);
 
             let blob: Blob;
-            const resolvedMime = entry.fileMime || guessMimeFromName(entry.fileName);
+            let resolvedMime = entry.fileMime || guessMimeFromName(entry.fileName);
             if (vaultItem) {
               blob =
                 vaultItem.blob.type === resolvedMime
@@ -525,7 +544,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
               const ordered: Uint8Array[] = [];
               for (let i = 1; i <= entry.totalWaves; i++) {
                 const c = entry.chunks.get(i);
-                if (c) ordered.push(c);
+                if (c && c.byteLength > 0) ordered.push(c);
               }
               const totalLen = ordered.reduce((acc, c) => acc + c.byteLength, 0);
               const contiguous = new Uint8Array(totalLen);
@@ -533,6 +552,25 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
               for (const c of ordered) {
                 contiguous.set(c, offset);
                 offset += c.byteLength;
+              }
+              if (contiguous.byteLength >= 4) {
+                if (contiguous[0] === 0xff && contiguous[1] === 0xd8) {
+                  resolvedMime = 'image/jpeg';
+                } else if (
+                  contiguous[0] === 0x52 &&
+                  contiguous[1] === 0x49 &&
+                  contiguous[2] === 0x46 &&
+                  contiguous[3] === 0x46
+                ) {
+                  resolvedMime = 'image/webp';
+                } else if (
+                  contiguous[0] === 0x89 &&
+                  contiguous[1] === 0x50 &&
+                  contiguous[2] === 0x4e &&
+                  contiguous[3] === 0x47
+                ) {
+                  resolvedMime = 'image/png';
+                }
               }
               blob = new Blob([contiguous], { type: resolvedMime });
             }

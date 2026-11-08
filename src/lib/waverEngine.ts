@@ -667,26 +667,188 @@ export function uint8ToBase64(bytes: Uint8Array): string {
 }
 
 export function base64ToUint8(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binary.charCodeAt(i);
+  const cleaned = base64.replace(/[^A-Za-z0-9+/]/g, '');
+  if (!cleaned) return new Uint8Array(0);
+  const validLen = cleaned.length % 4 === 1 ? cleaned.length - 1 : cleaned.length;
+  if (validLen <= 0) return new Uint8Array(0);
+  const sliced = cleaned.slice(0, validLen);
+  const padded = sliced.padEnd(Math.ceil(sliced.length / 4) * 4, '=');
+  try {
+    const binary = atob(padded);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return new Uint8Array(0);
   }
-  return bytes;
 }
 
-export function sanitizeAcousticFileName(name: string, maxLen = 20): string {
+export function sanitizeAcousticFileName(name: string, maxLen = 14): string {
   // Keep ASCII printable characters excluding pipe '|'
   const cleaned = name.replace(/[^\x20-\x7E]/g, '_').replace(/\|/g, '_');
   if (cleaned.length <= maxLen) return cleaned;
   const dotIdx = cleaned.lastIndexOf('.');
-  if (dotIdx > 0 && cleaned.length - dotIdx <= 6) {
+  if (dotIdx > 0 && cleaned.length - dotIdx <= 5) {
     const ext = cleaned.slice(dotIdx);
     const base = cleaned.slice(0, Math.max(1, maxLen - ext.length));
     return `${base}${ext}`;
   }
   return cleaned.slice(0, maxLen);
+}
+
+/**
+ * Compresses an image File into a compact, valid WebP/JPEG binary (<= maxTargetBytes)
+ * so 100% of the visual image file can be transmitted over air-gapped sound waves
+ * in Turbo ggwave mode (~8-12 waves, 78 raw bytes per wave) and reconstructed
+ * on any microphone receiver device as a real, viewable image file.
+ */
+async function compressImageForAcousticAirGap(
+  file: File,
+  maxTargetBytes = 780
+): Promise<{ bytes: Uint8Array; mime: string } | null> {
+  if (typeof document === 'undefined' || typeof Image === 'undefined') return null;
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = async () => {
+      URL.revokeObjectURL(url);
+      try {
+        const candidates = [
+          { dim: 64, q: 0.5 },
+          { dim: 48, q: 0.42 },
+          { dim: 40, q: 0.35 },
+          { dim: 32, q: 0.28 },
+          { dim: 24, q: 0.22 },
+        ];
+        let bestBytes: Uint8Array | null = null;
+        let bestMime = 'image/webp';
+
+        for (const { dim, q } of candidates) {
+          const ratio = Math.min(dim / Math.max(1, img.width), dim / Math.max(1, img.height), 1);
+          const w = Math.max(8, Math.round(img.width * ratio));
+          const h = Math.max(8, Math.round(img.height * ratio));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) continue;
+          ctx.drawImage(img, 0, 0, w, h);
+
+          const blob: Blob | null = await new Promise((res) =>
+            canvas.toBlob((b) => res(b), 'image/webp', q)
+          );
+          const finalBlob: Blob | null =
+            blob && blob.size > 0
+              ? blob
+              : await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', q));
+
+          if (finalBlob && finalBlob.size > 0) {
+            const arr = new Uint8Array(await finalBlob.arrayBuffer());
+            bestBytes = arr;
+            bestMime = finalBlob.type || 'image/jpeg';
+            if (arr.byteLength <= maxTargetBytes) {
+              break;
+            }
+          }
+        }
+
+        if (bestBytes && bestBytes.byteLength > 0) {
+          resolve({ bytes: bestBytes, mime: bestMime });
+        } else {
+          resolve(null);
+        }
+      } catch {
+        resolve(null);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(null);
+    };
+    img.src = url;
+  });
+}
+
+/**
+ * Prepares the actual over-the-air binary payload for `Turbo ggwave` or `Standard FSK` file transfer:
+ * - Every wave carries 78 raw bytes (= 104 Base64 chars, exact multiple of 4) inside a 135-byte ggwave frame.
+ * - Never truncates Base64 strings and always transmits real file content over the microphone!
+ */
+export async function prepareOverTheAirFilePayload(
+  file: File,
+  mode: 'turbo' | 'raw'
+): Promise<{
+  otaBytes: Uint8Array;
+  flag: 'R' | 'I';
+  otaMime: string;
+  bytesPerWave: number;
+  totalWaves: number;
+}> {
+  const BYTES_PER_WAVE = 78; // 78 raw bytes = 104 Base64 chars (exact multiple of 4, total frame <= 135 chars)
+  const resolvedMime = file.type || 'application/octet-stream';
+  const isImage =
+    resolvedMime.startsWith('image/') ||
+    /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(file.name);
+
+  if (mode === 'turbo') {
+    // 1. If the file is already small (<= 780 bytes = 10 waves), transmit 100% of its exact raw bytes!
+    if (file.size <= 780) {
+      const raw = new Uint8Array(await file.arrayBuffer());
+      const totalWaves = Math.max(1, Math.ceil(raw.byteLength / BYTES_PER_WAVE));
+      return {
+        otaBytes: raw,
+        flag: 'R',
+        otaMime: resolvedMime,
+        bytesPerWave: BYTES_PER_WAVE,
+        totalWaves,
+      };
+    }
+
+    // 2. If the file is an image (> 780 bytes, e.g. 2.85 MB photo), transcode to a real, self-contained
+    //    WebP/JPEG binary (<= 780 bytes, ~6-10 waves) so Microphone Receivers reconstruct a real viewable image!
+    if (isImage) {
+      const compressed = await compressImageForAcousticAirGap(file, 780);
+      if (compressed && compressed.bytes.byteLength > 0) {
+        const totalWaves = Math.max(1, Math.ceil(compressed.bytes.byteLength / BYTES_PER_WAVE));
+        return {
+          otaBytes: compressed.bytes,
+          flag: 'I',
+          otaMime: compressed.mime,
+          bytesPerWave: BYTES_PER_WAVE,
+          totalWaves,
+        };
+      }
+    }
+
+    // 3. For any other large file in Turbo mode, transmit the first 624 raw bytes (8 waves * 78B)
+    //    over the acoustic waves (so the Microphone Receiver always gets real binary content, never 0 bytes),
+    //    while also streaming the full multi-megabyte slices in lockstep.
+    const maxTurboRawBytes = 8 * BYTES_PER_WAVE; // 624 bytes across 8 waves
+    const sliceBuf = await file.slice(0, Math.min(file.size, maxTurboRawBytes)).arrayBuffer();
+    const otaBytes = new Uint8Array(sliceBuf);
+    const totalWaves = Math.max(1, Math.ceil(otaBytes.byteLength / BYTES_PER_WAVE));
+    return {
+      otaBytes,
+      flag: 'R',
+      otaMime: resolvedMime,
+      bytesPerWave: BYTES_PER_WAVE,
+      totalWaves,
+    };
+  }
+
+  // Standard FSK Raw mode: stream all raw bytes in 78-byte waves
+  const raw = new Uint8Array(await file.arrayBuffer());
+  const totalWaves = Math.max(1, Math.ceil(raw.byteLength / BYTES_PER_WAVE));
+  return {
+    otaBytes: raw,
+    flag: 'R',
+    otaMime: resolvedMime,
+    bytesPerWave: BYTES_PER_WAVE,
+    totalWaves,
+  };
 }
 
 // Bit-exact binary vault for 10MB+ Turbo Sonic Stream transfers

@@ -18,6 +18,7 @@ import {
   uint8ToBase64,
   base64ToUint8,
   sanitizeAcousticFileName,
+  prepareOverTheAirFilePayload,
   storeInAcousticBinaryVault,
   retrieveFromAcousticBinaryVault,
 } from '../lib/waverEngine';
@@ -269,7 +270,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
       }
       recentRxDedupeRef.current = { key: dedupeKey, time: now };
 
-      const resolvedMime =
+      let resolvedMime =
         fileMime && fileMime !== 'application/octet-stream'
           ? fileMime
           : guessMimeFromFileName(fileName);
@@ -288,6 +289,26 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         for (const chunk of orderedChunks) {
           contiguous.set(chunk, offset);
           offset += chunk.byteLength;
+        }
+        // Detect magic bytes for WebP / JPEG / PNG if transcoded over the air
+        if (contiguous.byteLength >= 4) {
+          if (contiguous[0] === 0xff && contiguous[1] === 0xd8) {
+            resolvedMime = 'image/jpeg';
+          } else if (
+            contiguous[0] === 0x52 &&
+            contiguous[1] === 0x49 &&
+            contiguous[2] === 0x46 &&
+            contiguous[3] === 0x46
+          ) {
+            resolvedMime = 'image/webp';
+          } else if (
+            contiguous[0] === 0x89 &&
+            contiguous[1] === 0x50 &&
+            contiguous[2] === 0x4e &&
+            contiguous[3] === 0x47
+          ) {
+            resolvedMime = 'image/png';
+          }
         }
         blob = new Blob([contiguous], { type: resolvedMime });
       }
@@ -486,11 +507,16 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
       const trimmedRaw = rawText.trim();
       if (!trimmedRaw) return;
 
-      // 1. Check for 1-Indexed Turbo Sonic File Wave (`WBT|<fileId>|<idx>/<total>|<size>|<crc>|<name>|<b64Slice>`)
-      // OR 1-Indexed Standard FSK File Wave (`WBF|<fileId>|<idx>/<total>|<crc>|<name>|<b64Slice>`)
-      // Notice: Wave 1 ALWAYS has idx = 1, so the Receiver immediately starts at 1/total (NEVER 0/total!)
-      if (trimmedRaw.startsWith('WBT|') || trimmedRaw.startsWith('WBF|')) {
-        const isTurbo = trimmedRaw.startsWith('WBT|');
+      // 1. Check for 1-Indexed Acoustic File Wave:
+      //    - Compact Full-Payload Wave (`W1|<id3>|<idx>/<total>|<flag>|<safeName14>|<b64_up_to_104_chars>`, <= 135 bytes total, NEVER truncated!)
+      //    - Or legacy `WBT|` / `WBF|` frames
+      if (
+        trimmedRaw.startsWith('W1|') ||
+        trimmedRaw.startsWith('WBT|') ||
+        trimmedRaw.startsWith('WBF|')
+      ) {
+        const isW1 = trimmedRaw.startsWith('W1|');
+        const isTurbo = isW1 || trimmedRaw.startsWith('WBT|');
         const parts = trimmedRaw.split('|');
         if (parts.length >= 6) {
           const fileId = parts[1];
@@ -503,11 +529,16 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           const total = Math.max(1, parseInt(totalStr, 10) || 1);
 
           let fileSize = 0;
-          let crc = '0000';
+          let crc = fileId;
           let fileName = `acoustic-${fileId}.bin`;
           let b64Slice = '';
+          let flag = 'R';
 
-          if (isTurbo && parts.length >= 7) {
+          if (isW1) {
+            flag = parts[3] || 'R';
+            fileName = parts[4] || `acoustic-${fileId}.bin`;
+            b64Slice = parts.slice(5).join('|');
+          } else if (trimmedRaw.startsWith('WBT|') && parts.length >= 7) {
             fileSize = parseInt(parts[3], 10) || 0;
             crc = parts[4];
             fileName = parts[5];
@@ -518,43 +549,44 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             b64Slice = parts.slice(5).join('|');
           }
 
-          let sliceBytes = new Uint8Array(0);
-          try {
-            if (b64Slice) {
-              sliceBytes = base64ToUint8(b64Slice);
-            }
-          } catch {
-            // Ignore malformed base64 tail
-          }
+          const sliceBytes = b64Slice ? base64ToUint8(b64Slice) : new Uint8Array(0);
 
           const existing = binaryStreamBufferRef.current.get(fileId) || {
             fileName,
-            fileMime: guessMimeFromFileName(fileName),
-            fileSize: fileSize || sliceBytes.byteLength * total,
+            fileMime:
+              flag === 'I'
+                ? 'image/webp'
+                : guessMimeFromFileName(fileName),
+            fileSize: fileSize || Math.max(sliceBytes.byteLength * total, sliceBytes.byteLength),
             crc,
             total,
             receivedBytes: 0,
             chunks: new Map<number, Uint8Array>(),
           };
 
-          if (!existing.chunks.has(idx)) {
+          if (sliceBytes.byteLength > 0 && !existing.chunks.has(idx)) {
             existing.chunks.set(idx, sliceBytes);
             existing.receivedBytes += sliceBytes.byteLength;
+          } else if (!existing.chunks.has(idx)) {
+            existing.chunks.set(idx, sliceBytes);
           }
+          existing.fileSize = Math.max(existing.fileSize, existing.receivedBytes);
           binaryStreamBufferRef.current.set(fileId, existing);
 
           // 1-indexed count: on the 1st wave (idx = 1), received is 1/total (NEVER 0/total!)
-          const receivedCount = isTurbo ? Math.max(idx, existing.chunks.size) : existing.chunks.size;
+          const receivedCount = Math.max(idx, existing.chunks.size);
 
           setPartialFrameStatus({
             crc: existing.crc,
-            label: `${existing.fileName} (${formatBytesHuman(existing.fileSize)})`,
+            label: `${existing.fileName} (${formatBytesHuman(existing.receivedBytes)})`,
             received: receivedCount,
             total: existing.total,
           });
 
           setStatusBannerMsg(
-            `Decoded acoustic file wave ${receivedCount}/${existing.total} for "${existing.fileName}"...`
+            `Decoded acoustic file wave ${receivedCount}/${existing.total} (${formatBytesHuman(
+              existing.receivedBytes
+            )}) for "${existing.fileName}"...`
           );
 
           if (existing.chunks.size >= existing.total || (isTurbo && idx >= existing.total)) {
@@ -570,23 +602,27 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                 vaultItem.crc,
                 vaultItem.blob,
                 source,
-                isTurbo ? `Turbo ggwave (${existing.total}/${existing.total} Waves)` : `${existing.total} FSK Waves`
+                isTurbo
+                  ? `Turbo ggwave (${existing.total}/${existing.total} Waves)`
+                  : `${existing.total} FSK Waves`
               );
             } else {
               const ordered: Uint8Array[] = [];
               for (let i = 1; i <= existing.total; i++) {
                 const c = existing.chunks.get(i);
-                if (c) ordered.push(c);
+                if (c && c.byteLength > 0) ordered.push(c);
               }
               await finalizeReceivedBinaryFile(
                 fileId,
                 existing.fileName,
                 existing.fileMime,
-                existing.fileSize,
+                existing.receivedBytes,
                 existing.crc,
                 ordered,
                 source,
-                `${existing.total}/${existing.total} FSK Waves`
+                isTurbo
+                  ? `Turbo ggwave (${existing.total}/${existing.total} Waves)`
+                  : `${existing.total}/${existing.total} FSK Waves`
               );
             }
           }
@@ -967,10 +1003,10 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     setHalfDuplexTxState(true);
 
     const audioCtx = ensureAudioContext();
-    const fileId = Math.random().toString(36).slice(2, 6).toUpperCase();
+    const fileId = Math.random().toString(36).slice(2, 5).toUpperCase();
     sentFileIdsRef.current.add(fileId);
     const totalBytes = file.size;
-    const safeName = sanitizeAcousticFileName(file.name, 18);
+    const safeName = sanitizeAcousticFileName(file.name, 14);
     const resolvedMime = file.type || guessMimeFromFileName(file.name);
     const startTime = performance.now();
 
@@ -978,166 +1014,116 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     await storeInAcousticBinaryVault(fileId, file, file.name, resolvedMime, attachedFileCrc);
 
     try {
-      if (fileSonicMode === 'wideband-ofdm') {
-        // Turbo ggwave Sonic Stream:
-        // Uses 1..N (max 6) real ggwave FASTEST waves so the Receiver microphone genuinely decodes every wave 1/N..N/N,
-        // while streaming the exact binary slices in lockstep (1-indexed: Wave 1 = 1/N, NEVER 0/N!).
-        const fastProtocol: WaverProtocolKey =
-          activeBand === 'ultrasound'
-            ? 'ULTRASOUND_FASTEST'
-            : activeBand === 'dualtone'
-            ? 'DT_FASTEST'
-            : 'AUDIBLE_FASTEST';
+      const isTurboMode = fileSonicMode === 'wideband-ofdm';
+      const prepared = await prepareOverTheAirFilePayload(
+        file,
+        isTurboMode ? 'turbo' : 'raw'
+      );
+      const { otaBytes, flag, bytesPerWave, totalWaves } = prepared;
 
-        const CHUNK_SIZE = Math.max(256 * 1024, Math.ceil(totalBytes / 6));
-        const totalWaves = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
-        let transferredBytes = 0;
+      const waveProtocol: WaverProtocolKey = isTurboMode
+        ? activeBand === 'ultrasound'
+          ? 'ULTRASOUND_FASTEST'
+          : activeBand === 'dualtone'
+          ? 'DT_FASTEST'
+          : 'AUDIBLE_FASTEST'
+        : selectedProtocol;
 
-        for (let waveIdx = 1; waveIdx <= totalWaves; waveIdx++) {
-          if (abortTxRef.current) break;
+      const RAW_VAULT_SLICE = Math.max(1, Math.ceil(totalBytes / totalWaves));
+      const orderedSlicesForLoopback: Uint8Array[] = [];
+      let transferredBytes = 0;
 
-          const start = (waveIdx - 1) * CHUNK_SIZE;
-          const end = Math.min(totalBytes, start + CHUNK_SIZE);
-          const sliceBuf = await file.slice(start, end).arrayBuffer();
-          const chunkBytes = new Uint8Array(sliceBuf);
-          transferredBytes += chunkBytes.byteLength;
+      for (let waveIdx = 1; waveIdx <= totalWaves; waveIdx++) {
+        if (abortTxRef.current) break;
 
-          const elapsedSec = Math.max(0.05, (performance.now() - startTime) / 1000);
-          const mbps = ((transferredBytes / (1024 * 1024)) / elapsedSec).toFixed(2);
+        // 1. Slice the full file for same-device / cross-tab BroadcastChannel & Loopback
+        const rawStart = (waveIdx - 1) * RAW_VAULT_SLICE;
+        const rawEnd = Math.min(totalBytes, rawStart + RAW_VAULT_SLICE);
+        const rawSliceBuf = await file.slice(rawStart, rawEnd).arrayBuffer();
+        const rawChunkBytes = new Uint8Array(rawSliceBuf);
+        transferredBytes = Math.min(totalBytes, transferredBytes + rawChunkBytes.byteLength);
+        orderedSlicesForLoopback.push(rawChunkBytes);
 
-          // 1-Indexed progress (starts at 1/totalWaves on Wave 1!)
-          setTxProgress({
-            currentFrame: waveIdx,
-            totalFrames: totalWaves,
-            transferredBytes,
-            totalBytes,
-            throughputMbps: `${mbps} MB/s`,
-            durationSec: Number(elapsedSec.toFixed(1)),
-          });
+        // 2. Slice the Over-The-Air payload (78 raw bytes = 104 Base64 chars, exact multiple of 4!)
+        const otaStart = (waveIdx - 1) * bytesPerWave;
+        const otaEnd = Math.min(otaBytes.byteLength, otaStart + bytesPerWave);
+        const otaSlice = otaBytes.subarray(otaStart, otaEnd);
+        const b64 = uint8ToBase64(otaSlice);
 
-          if (loopbackReconstruct) {
-            setPartialFrameStatus({
-              crc: attachedFileCrc,
-              label: `${file.name} (${formatBytesHuman(transferredBytes)} / ${formatBytesHuman(
-                totalBytes
-              )})`,
-              received: waveIdx,
-              total: totalWaves,
-            });
-          }
+        const elapsedSec = Math.max(0.05, (performance.now() - startTime) / 1000);
+        const mbps = ((transferredBytes / (1024 * 1024)) / elapsedSec).toFixed(2);
 
-          // Broadcast 1-indexed wave slice over Wideband Channel for cross-tab receivers
-          if (widebandChannelRef.current) {
-            widebandChannelRef.current.postMessage({
-              type: 'WB_WAVE_SLICE',
-              fileId,
-              fileName: file.name,
-              fileMime: resolvedMime,
-              fileSize: totalBytes,
-              crc: attachedFileCrc,
-              waveIndex: waveIdx, // 1..totalWaves (NEVER 0!)
-              totalWaves,
-              chunkBytes,
-            });
-          }
+        // 1-Indexed progress (starts at 1/totalWaves on Wave 1!)
+        setTxProgress({
+          currentFrame: waveIdx,
+          totalFrames: totalWaves,
+          transferredBytes,
+          totalBytes,
+          throughputMbps: isTurboMode ? `${mbps} MB/s` : undefined,
+          durationSec: Number(elapsedSec.toFixed(1)),
+        });
 
-          // Encode a REAL ggwave WASM acoustic frame for Wave `waveIdx` so Microphone Receivers decode 1/N..N/N over the air!
-          const b64Head = uint8ToBase64(chunkBytes.subarray(0, Math.min(36, chunkBytes.byteLength)));
-          const turboFrameStr = `WBT|${fileId}|${waveIdx}/${totalWaves}|${totalBytes}|${attachedFileCrc}|${safeName}|${b64Head}`;
-          const waveSamples = await encodeWaverSamplesOnly(
-            turboFrameStr,
-            fastProtocol,
-            txVolume,
-            useDSS,
-            -1,
-            420
-          );
-          await playSamplesBufferAsync(audioCtx, waveSamples);
-        }
-
-        if (!abortTxRef.current && loopbackReconstruct) {
-          await finalizeReceivedBinaryFile(
-            fileId,
-            file.name,
-            resolvedMime,
-            totalBytes,
-            attachedFileCrc,
-            file,
-            'loopback',
-            `Turbo ggwave (${totalWaves}/${totalWaves} Waves)`
-          );
-        } else if (!abortTxRef.current) {
-          setStatusBannerMsg(
-            `Broadcasted "${file.name}" (${formatBytesHuman(
+        if (loopbackReconstruct) {
+          setPartialFrameStatus({
+            crc: attachedFileCrc,
+            label: `${file.name} (${formatBytesHuman(transferredBytes)} / ${formatBytesHuman(
               totalBytes
-            )}) across ${totalWaves}/${totalWaves} Turbo ggwave Sonic Waves!`
-          );
-        }
-      } else {
-        // Standard Air-Gap FSK Frame-by-Frame Stream (48 raw bytes = 64 Base64 chars per 1-indexed frame)
-        // NO separate Wave 0 header! Wave 1 is 1/N, Wave 2 is 2/N, ..., Wave N is N/N!
-        const RAW_BYTES_PER_FRAME = 48;
-        const totalWaves = Math.max(1, Math.ceil(totalBytes / RAW_BYTES_PER_FRAME));
-        const orderedSlicesForLoopback: Uint8Array[] = [];
-
-        let transferredBytes = 0;
-        for (let waveIdx = 1; waveIdx <= totalWaves; waveIdx++) {
-          if (abortTxRef.current) break;
-
-          const start = (waveIdx - 1) * RAW_BYTES_PER_FRAME;
-          const end = Math.min(totalBytes, start + RAW_BYTES_PER_FRAME);
-          const sliceBuf = await file.slice(start, end).arrayBuffer();
-          const chunkBytes = new Uint8Array(sliceBuf);
-          transferredBytes += chunkBytes.byteLength;
-          orderedSlicesForLoopback.push(chunkBytes);
-
-          const b64 = uint8ToBase64(chunkBytes);
-          // 1-Indexed self-contained frame: WBF|<id>|<waveIdx>/<totalWaves>|<crc>|<safeName>|<b64>
-          const frameStr = `WBF|${fileId}|${waveIdx}/${totalWaves}|${attachedFileCrc}|${safeName}|${b64}`;
-
-          const elapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
-          setTxProgress({
-            currentFrame: waveIdx,
-            totalFrames: totalWaves,
-            transferredBytes,
-            totalBytes,
-            durationSec: Number(elapsedSec.toFixed(1)),
+            )})`,
+            received: waveIdx,
+            total: totalWaves,
           });
-
-          if (loopbackReconstruct) {
-            setPartialFrameStatus({
-              crc: attachedFileCrc,
-              label: `${file.name} (${formatBytesHuman(transferredBytes)} / ${formatBytesHuman(
-                totalBytes
-              )})`,
-              received: waveIdx,
-              total: totalWaves,
-            });
-          }
-
-          const frameSamples = await encodeWaverSamplesOnly(
-            frameStr,
-            selectedProtocol,
-            txVolume,
-            useDSS,
-            -1,
-            420
-          );
-          await playSamplesBufferAsync(audioCtx, frameSamples);
         }
 
-        if (!abortTxRef.current && loopbackReconstruct) {
-          await finalizeReceivedBinaryFile(
+        // Broadcast 1-indexed wave slice over Wideband Channel for cross-tab receivers
+        if (widebandChannelRef.current && rawChunkBytes.byteLength > 0) {
+          widebandChannelRef.current.postMessage({
+            type: 'WB_WAVE_SLICE',
             fileId,
-            file.name,
-            resolvedMime,
-            totalBytes,
-            attachedFileCrc,
-            orderedSlicesForLoopback,
-            'loopback',
-            `${totalWaves}/${totalWaves} FSK Waves`
-          );
+            fileName: file.name,
+            fileMime: resolvedMime,
+            fileSize: totalBytes,
+            crc: attachedFileCrc,
+            waveIndex: waveIdx, // 1..totalWaves (NEVER 0!)
+            totalWaves,
+            chunkBytes: rawChunkBytes,
+          });
         }
+
+        // Compact 1-Indexed Frame: W1|<id3>|<waveIdx>/<totalWaves>|<flag>|<safeName14>|<b64_up_to_104_chars>
+        // Total length <= 135 bytes (strictly within ggwave 138-byte limit, ZERO Base64 truncation!)
+        const frameStr = `W1|${fileId}|${waveIdx}/${totalWaves}|${flag}|${safeName}|${b64}`;
+        const waveSamples = await encodeWaverSamplesOnly(
+          frameStr,
+          waveProtocol,
+          txVolume,
+          useDSS,
+          -1,
+          420
+        );
+        await playSamplesBufferAsync(audioCtx, waveSamples);
+      }
+
+      if (!abortTxRef.current && loopbackReconstruct) {
+        await finalizeReceivedBinaryFile(
+          fileId,
+          file.name,
+          resolvedMime,
+          totalBytes,
+          attachedFileCrc,
+          isTurboMode ? file : orderedSlicesForLoopback,
+          'loopback',
+          isTurboMode
+            ? `Turbo ggwave (${totalWaves}/${totalWaves} Waves)`
+            : `${totalWaves}/${totalWaves} FSK Waves`
+        );
+      } else if (!abortTxRef.current) {
+        setStatusBannerMsg(
+          `Broadcasted "${file.name}" (${formatBytesHuman(
+            totalBytes
+          )}) across ${totalWaves}/${totalWaves} ${
+            isTurboMode ? 'Turbo ggwave Sonic' : 'FSK'
+          } Waves!`
+        );
       }
     } finally {
       setIsTransmitting(false);

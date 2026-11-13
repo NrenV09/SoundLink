@@ -14,44 +14,51 @@
   --color-card: var(--color-card-val);
 
   --font-sans: "Plus Jakarta Sans", "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-display: "Space Grotesk", "Plus Jakarta Sans", sans-serif;
+  --font-display: "Space Grotesk", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
 }
 
 :root {
-  --md-sys-color-primary: #1B6EF3;
+  --studio-accent: #6366F1;
+  --studio-accent-soft: rgba(99, 102, 241, 0.12);
+  --studio-border: rgba(228, 228, 231, 0.85);
+  --studio-border-strong: rgba(212, 212, 216, 0.95);
+  --studio-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 28px -10px rgba(15, 23, 42, 0.08);
+  --studio-top-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+
+  --md-sys-color-primary: #6366F1;
   --md-sys-color-on-primary: #FFFFFF;
-  --md-sys-color-primary-container: #D8E2FF;
-  --md-sys-color-on-primary-container: #001A41;
+  --md-sys-color-primary-container: #E0E7FF;
+  --md-sys-color-on-primary-container: #1E1B4B;
 
-  --md-sys-color-secondary: #535E78;
+  --md-sys-color-secondary: #475569;
   --md-sys-color-on-secondary: #FFFFFF;
-  --md-sys-color-secondary-container: #DCE4F9;
-  --md-sys-color-on-secondary-container: #0F1B32;
+  --md-sys-color-secondary-container: #EEF2FF;
+  --md-sys-color-on-secondary-container: #312E81;
 
-  --md-sys-color-tertiary: #0D9488;
+  --md-sys-color-tertiary: #10B981;
   --md-sys-color-on-tertiary: #FFFFFF;
-  --md-sys-color-tertiary-container: #CCFBF1;
-  --md-sys-color-on-tertiary-container: #042F2E;
+  --md-sys-color-tertiary-container: #D1FAE5;
+  --md-sys-color-on-tertiary-container: #064E3B;
 
-  --md-sys-color-surface: #F6F8FD;
+  --md-sys-color-surface: #F8FAFC;
   --md-sys-color-surface-container-lowest: #FFFFFF;
-  --md-sys-color-surface-container-low: #EEF2FA;
-  --md-sys-color-surface-container: #E7ECF6;
-  --md-sys-color-surface-container-high: #E0E6F2;
-  --md-sys-color-surface-container-highest: #D8DFEE;
+  --md-sys-color-surface-container-low: #FFFFFF;
+  --md-sys-color-surface-container: #F1F5F9;
+  --md-sys-color-surface-container-high: #E2E8F0;
+  --md-sys-color-surface-container-highest: #CBD5E1;
 
-  --md-sys-color-on-surface: #141820;
-  --md-sys-color-on-surface-variant: #494E5B;
-  --md-sys-color-outline: #757A87;
-  --md-sys-color-outline-variant: rgba(115, 119, 129, 0.14);
-  --md-sys-color-outline-variant-solid: #CBD0DC;
+  --md-sys-color-on-surface: #09090B;
+  --md-sys-color-on-surface-variant: #52525B;
+  --md-sys-color-outline: #71717A;
+  --md-sys-color-outline-variant: rgba(228, 228, 231, 0.85);
+  --md-sys-color-outline-variant-solid: #D4D4D8;
 
   --color-bg-val: var(--md-sys-color-surface);
   --color-surface-val: var(--md-sys-color-surface-container-low);
   --color-surface-brighter-val: var(--md-sys-color-surface-container-high);
   --color-accent-val: var(--md-sys-color-primary);
-  --color-success-val: #15803D;
+  --color-success-val: #10B981;
   --color-border-val: var(--md-sys-color-outline-variant);
   --color-muted-val: var(--md-sys-color-on-surface-variant);
   --color-text-val: var(--md-sys-color-on-surface);
@@ -61,39 +68,46 @@
 }
 
 html.dark {
-  --md-sys-color-primary: #A8C7FA;
-  --md-sys-color-on-primary: #002E69;
-  --md-sys-color-primary-container: #123B82;
-  --md-sys-color-on-primary-container: #D8E2FF;
+  --studio-accent: #6366F1;
+  --studio-accent-soft: rgba(99, 102, 241, 0.16);
+  --studio-border: rgba(255, 255, 255, 0.1);
+  --studio-border-strong: rgba(255, 255, 255, 0.18);
+  --studio-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 38px -14px rgba(0, 0, 0, 0.65);
+  --studio-top-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
 
-  --md-sys-color-secondary: #BBC6E4;
-  --md-sys-color-on-secondary: #253048;
-  --md-sys-color-secondary-container: #2B354D;
-  --md-sys-color-on-secondary-container: #D7E2FF;
+  --md-sys-color-primary: #818CF8;
+  --md-sys-color-on-primary: #FFFFFF;
+  --md-sys-color-primary-container: rgba(99, 102, 241, 0.18);
+  --md-sys-color-on-primary-container: #E0E7FF;
 
-  --md-sys-color-tertiary: #5EEAD4;
-  --md-sys-color-on-tertiary: #003731;
-  --md-sys-color-tertiary-container: #064E46;
-  --md-sys-color-on-tertiary-container: #CCFBF1;
+  --md-sys-color-secondary: #94A3B8;
+  --md-sys-color-on-secondary: #0F172A;
+  --md-sys-color-secondary-container: rgba(255, 255, 255, 0.08);
+  --md-sys-color-on-secondary-container: #F4F4F5;
 
-  --md-sys-color-surface: #0B0E14;
-  --md-sys-color-surface-container-lowest: #07090D;
-  --md-sys-color-surface-container-low: #121721;
-  --md-sys-color-surface-container: #171D29;
-  --md-sys-color-surface-container-high: #1F2636;
-  --md-sys-color-surface-container-highest: #283144;
+  --md-sys-color-tertiary: #34D399;
+  --md-sys-color-on-tertiary: #022C22;
+  --md-sys-color-tertiary-container: rgba(16, 185, 129, 0.16);
+  --md-sys-color-on-tertiary-container: #D1FAE5;
 
-  --md-sys-color-on-surface: #E5E9F4;
-  --md-sys-color-on-surface-variant: #9BA2B4;
-  --md-sys-color-outline: #6E7585;
-  --md-sys-color-outline-variant: rgba(148, 163, 184, 0.1);
-  --md-sys-color-outline-variant-solid: #2E3646;
+  --md-sys-color-surface: #09090B;
+  --md-sys-color-surface-container-lowest: #060608;
+  --md-sys-color-surface-container-low: #121216;
+  --md-sys-color-surface-container: #18181D;
+  --md-sys-color-surface-container-high: #1F1F26;
+  --md-sys-color-surface-container-highest: #272730;
+
+  --md-sys-color-on-surface: #F4F4F5;
+  --md-sys-color-on-surface-variant: #A1A1AA;
+  --md-sys-color-outline: #71717A;
+  --md-sys-color-outline-variant: rgba(255, 255, 255, 0.1);
+  --md-sys-color-outline-variant-solid: #27272A;
 
   --color-bg-val: var(--md-sys-color-surface);
   --color-surface-val: var(--md-sys-color-surface-container-low);
   --color-surface-brighter-val: var(--md-sys-color-surface-container-high);
   --color-accent-val: var(--md-sys-color-primary);
-  --color-success-val: #22C55E;
+  --color-success-val: #10B981;
   --color-border-val: var(--md-sys-color-outline-variant);
   --color-muted-val: var(--md-sys-color-on-surface-variant);
   --color-text-val: var(--md-sys-color-on-surface);
@@ -108,7 +122,7 @@ html.dark {
     background-color: var(--bg-color);
     color: var(--color-text);
     font-family: var(--font-sans);
-    letter-spacing: 0.002em;
+    letter-spacing: -0.004em;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     -webkit-tap-highlight-color: transparent;
@@ -117,98 +131,204 @@ html.dark {
 
   h1, h2, h3, h4 {
     font-family: var(--font-display);
+    letter-spacing: -0.02em;
     text-wrap: balance;
   }
 
-  .font-mono {
+  .font-mono,
+  .tabular-nums {
     font-variant-numeric: tabular-nums;
   }
 
-  button {
-    transition: transform 0.14s cubic-bezier(0.2, 0, 0, 1),
-                background-color 0.16s cubic-bezier(0.2, 0, 0, 1),
-                color 0.16s cubic-bezier(0.2, 0, 0, 1),
-                box-shadow 0.16s cubic-bezier(0.2, 0, 0, 1),
-                opacity 0.16s cubic-bezier(0.2, 0, 0, 1);
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    transition: transform 0.15s cubic-bezier(0.2, 0, 0, 1),
+                background-color 0.2s cubic-bezier(0.2, 0, 0, 1),
+                border-color 0.2s cubic-bezier(0.2, 0, 0, 1),
+                color 0.2s cubic-bezier(0.2, 0, 0, 1),
+                box-shadow 0.2s cubic-bezier(0.2, 0, 0, 1),
+                opacity 0.2s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid var(--studio-accent);
+    outline-offset: 2px;
   }
 }
 
 @layer utilities {
-  /* Borderless Material You Tonal Surface Containers — No boxy 1px wireframes */
+  /* Precision Studio Ambient Micro Dot-Grid Backdrop */
+  .studio-dot-grid {
+    background-image: radial-gradient(rgba(161, 161, 170, 0.16) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  html.dark .studio-dot-grid {
+    background-image: radial-gradient(rgba(255, 255, 255, 0.065) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  /* Hyperrealistic Layered Surface Elevation */
+  .studio-card,
   .glass-panel,
   .m3-card {
     background-color: var(--md-sys-color-surface-container-low);
-    border-radius: 28px;
-    border: none;
+    border-radius: 24px;
+    border: 1px solid var(--studio-border);
+    box-shadow: var(--studio-card-shadow), var(--studio-top-highlight);
+  }
+
+  .studio-card-hover {
+    background-color: var(--md-sys-color-surface-container-low);
+    border-radius: 24px;
+    border: 1px solid var(--studio-border);
+    box-shadow: var(--studio-card-shadow), var(--studio-top-highlight);
+  }
+  .studio-card-hover:hover {
+    border-color: var(--studio-border-strong);
   }
 
   .glass-panel-heavy,
   .m3-card-xl {
     background-color: var(--md-sys-color-surface-container-low);
-    border-radius: 32px;
-    border: none;
+    border-radius: 28px;
+    border: 1px solid var(--studio-border);
+    box-shadow: var(--studio-card-shadow), var(--studio-top-highlight);
   }
 
-  .m3-surface-low {
+  .m3-surface-low,
+  .studio-inset {
     background-color: var(--md-sys-color-surface-container-lowest);
-    border-radius: 24px;
-    border: none;
+    border-radius: 18px;
+    border: 1px solid var(--studio-border);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  html.dark .m3-surface-low,
+  html.dark .studio-inset {
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45);
   }
 
   .m3-surface-high {
     background-color: var(--md-sys-color-surface-container-high);
-    border-radius: 24px;
-    border: none;
+    border-radius: 20px;
+    border: 1px solid var(--studio-border);
+    box-shadow: var(--studio-top-highlight);
   }
 
   .m3-surface-interactive {
     background-color: var(--md-sys-color-surface-container);
     color: var(--md-sys-color-on-surface);
-    border: none;
+    border: 1px solid var(--studio-border);
   }
   .m3-surface-interactive:hover {
     background-color: var(--md-sys-color-surface-container-high);
+    border-color: var(--studio-border-strong);
   }
 
   .m3-tonal-active {
     background-color: var(--md-sys-color-primary-container);
     color: var(--md-sys-color-on-primary-container);
-    border: none;
+    border: 1px solid color-mix(in srgb, var(--studio-accent) 36%, transparent);
   }
 
   .m3-btn-filled {
-    background-color: var(--md-sys-color-primary);
-    color: var(--md-sys-color-on-primary);
+    background-color: var(--studio-accent);
+    color: #FFFFFF;
     border-radius: 9999px;
-    border: none;
+    border: 1px solid color-mix(in srgb, #FFFFFF 18%, transparent);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25),
+                0 6px 18px -4px color-mix(in srgb, var(--studio-accent) 50%, transparent),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.22);
   }
-  .m3-btn-filled:hover {
-    filter: brightness(1.06);
+  .m3-btn-filled:hover:not(:disabled) {
+    filter: brightness(1.08);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3),
+                0 10px 24px -4px color-mix(in srgb, var(--studio-accent) 62%, transparent),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.28);
+  }
+  .m3-btn-filled:active:not(:disabled) {
+    transform: scale(0.98);
   }
 
   .m3-btn-tonal {
-    background-color: var(--md-sys-color-secondary-container);
-    color: var(--md-sys-color-on-secondary-container);
+    background-color: var(--md-sys-color-surface-container);
+    color: var(--md-sys-color-on-surface);
     border-radius: 9999px;
-    border: none;
+    border: 1px solid var(--studio-border);
+    box-shadow: var(--studio-top-highlight);
   }
-  .m3-btn-tonal:hover {
-    filter: brightness(1.05);
+  .m3-btn-tonal:hover:not(:disabled) {
+    background-color: var(--md-sys-color-surface-container-high);
+    border-color: var(--studio-border-strong);
+  }
+  .m3-btn-tonal:active:not(:disabled) {
+    transform: scale(0.98);
   }
 
   .m3-btn-tertiary {
     background-color: var(--md-sys-color-tertiary-container);
     color: var(--md-sys-color-on-tertiary-container);
     border-radius: 9999px;
-    border: none;
+    border: 1px solid color-mix(in srgb, var(--md-sys-color-tertiary) 30%, transparent);
+  }
+  .m3-btn-tertiary:hover:not(:disabled) {
+    filter: brightness(1.06);
+  }
+  .m3-btn-tertiary:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  /* Custom Precision Studio Range Slider */
+  .studio-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 9999px;
+    background: var(--md-sys-color-surface-container-high);
+    border: 1px solid var(--studio-border);
+    cursor: pointer;
+  }
+
+  .studio-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    background: var(--studio-accent);
+    border: 2px solid #FFFFFF;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .studio-range::-webkit-slider-thumb:hover {
+    transform: scale(1.12);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--studio-accent) 26%, transparent);
+  }
+
+  .studio-range::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    background: var(--studio-accent);
+    border: 2px solid #FFFFFF;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   }
 
   /* Floating Expressive Mobile Navigation Pill Dock */
   .m3-nav-bar {
-    background-color: color-mix(in srgb, var(--md-sys-color-surface-container-high) 88%, transparent);
+    background-color: color-mix(in srgb, var(--md-sys-color-surface-container-low) 88%, transparent);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
-    box-shadow: 0 12px 36px -8px rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--studio-border);
+    box-shadow: 0 12px 36px -8px rgba(0, 0, 0, 0.45), var(--studio-top-highlight);
   }
 
   .pb-safe {

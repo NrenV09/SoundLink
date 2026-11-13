@@ -33,6 +33,7 @@ interface SecureChatNodeProps {
     filePayload?: ChatMessage['filePayload']
   ) => void;
   senderName: string;
+  onNotify?: (title: string, description?: string, type?: 'success' | 'info' | 'warning' | 'error') => void;
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -64,6 +65,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
   onSendVoiceMessage,
   onIncomingAcousticMessage,
   senderName,
+  onNotify,
 }) => {
   const [inputText, setInputText] = useState('');
   const [selectedProtocol, setSelectedProtocol] = useState<WaverProtocolKey>('AUDIBLE_FAST');
@@ -74,6 +76,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [statusNote, setStatusNote] = useState<string | null>(null);
+  const [isDraggingChatFile, setIsDraggingChatFile] = useState<boolean>(false);
   const [fileStreamProgress, setFileStreamProgress] = useState<{
     fileName: string;
     current: number;
@@ -320,11 +323,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
   };
 
   // Stream a binary file directly inside Sonic Chat using 1-indexed real ggwave WASM waves (Wave 1 = 1/N)
-  const handleAttachBinaryFileInChat = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = '';
-
+  const streamBinaryFileInChat = async (file: File) => {
     try {
       setIsBroadcasting(true);
       setHalfDuplexChatTxState(true);
@@ -415,13 +414,26 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           file.size
         )}) across ${totalWaves}/${totalWaves} waves!`
       );
+      onNotify?.(
+        `Streamed "${file.name}"`,
+        `${formatBytesHuman(file.size)} across ${totalWaves}/${totalWaves} waves`,
+        'success'
+      );
     } catch (err: any) {
       setStatusNote(`File stream error: ${err?.message}`);
+      onNotify?.('File Stream Error', err?.message, 'error');
     } finally {
       setFileStreamProgress(null);
       setIsBroadcasting(false);
       setHalfDuplexChatTxState(false);
     }
+  };
+
+  const handleAttachBinaryFileInChat = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    await streamBinaryFileInChat(file);
   };
 
   const handleSend = async (e: React.FormEvent) => {
@@ -450,12 +462,14 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       const decoded = await decodeWaverFullBuffer(encoded.samples, false, -1);
       if (decoded.length > 0 && onIncomingAcousticMessage) {
         onIncomingAcousticMessage(decoded[0], encoded.protocol.shortLabel);
+        onNotify?.('Loopback Ping Decoded', `${encoded.byteLength}B via ggwave WASM`, 'success');
       }
       setStatusNote(`Loopback decoded ${encoded.byteLength}B via ggwave WASM.`);
     } catch (err: any) {
       setIsBroadcasting(false);
       setHalfDuplexChatTxState(false);
       setStatusNote(`Loopback failed: ${err?.message}`);
+      onNotify?.('Loopback Failed', err?.message, 'error');
     }
   };
 
@@ -793,29 +807,73 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
 
   return (
     <div
-      className="rounded-[32px] p-4 sm:p-6 flex flex-col h-[calc(100dvh-9.5rem)] md:h-[calc(100dvh-6.5rem)] min-h-[460px] max-h-[840px] overflow-hidden"
-      style={{ background: 'var(--md-sys-color-surface-container-low)' }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsDraggingChatFile(true);
+      }}
+      onDragLeave={() => setIsDraggingChatFile(false)}
+      onDrop={async (e) => {
+        e.preventDefault();
+        setIsDraggingChatFile(false);
+        const file = e.dataTransfer.files?.[0];
+        if (file && !isBroadcasting) {
+          await streamBinaryFileInChat(file);
+        }
+      }}
+      className={`studio-card p-4 sm:p-6 flex flex-col flex-1 h-[calc(100dvh-14.5rem)] md:h-[calc(100dvh-12.5rem)] min-h-[440px] overflow-hidden transition-all ${
+        isDraggingChatFile
+          ? 'ring-2 ring-[var(--studio-accent)] ring-offset-2 ring-offset-[var(--md-sys-color-surface)]'
+          : ''
+      }`}
     >
       {/* Fixed Top Bar Inside Chat Card */}
-      <div className="shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-[var(--md-sys-color-outline-variant)]">
-        <div className="min-w-0">
-          <h3 className="text-lg font-extrabold text-[var(--md-sys-color-on-surface)]">
-            Sonic Chat
-          </h3>
-          <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] truncate">
-            {statusNote || 'Air-gapped messages & 10MB+ binary files modulated over 48,000 Hz sound waves'}
-          </p>
+      <div
+        className="shrink-0 flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3.5 border-b"
+        style={{ borderColor: 'var(--studio-border)' }}
+      >
+        <div className="min-w-0 flex items-center gap-3">
+          <div
+            className="w-9 h-9 rounded-xl flex items-center justify-center border shrink-0"
+            style={{
+              background: 'var(--md-sys-color-primary-container)',
+              borderColor: 'color-mix(in srgb, var(--studio-accent) 30%, transparent)',
+              color: 'var(--studio-accent)',
+            }}
+          >
+            <MaterialSymbol name="forum" className="text-base" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="text-base sm:text-lg font-bold text-[var(--md-sys-color-on-surface)]">
+                Sonic Chat
+              </h3>
+              {isListeningMic && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
+                  MIC RX
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] truncate">
+              {isDraggingChatFile
+                ? 'Drop file to broadcast over acoustic sound waves...'
+                : statusNote ||
+                  'Air-gapped messages & 10MB+ binary files modulated over 48,000 Hz sound waves'}
+            </p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide pb-0.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <select
             value={selectedProtocol}
             onChange={(e) => setSelectedProtocol(e.target.value as WaverProtocolKey)}
-            className="min-h-[38px] px-3.5 py-1.5 rounded-full text-xs font-bold cursor-pointer focus:outline-none shrink-0"
+            className="min-h-[38px] px-3.5 py-1.5 rounded-full text-xs font-semibold cursor-pointer focus:outline-none shrink-0 border"
             style={{
               background: 'var(--md-sys-color-surface-container)',
+              borderColor: 'var(--studio-border)',
               color: 'var(--md-sys-color-on-surface)',
             }}
+            aria-label="Acoustic Protocol"
           >
             {WAVER_PROTOCOLS.map((p) => (
               <option key={p.key} value={p.key}>
@@ -827,17 +885,20 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           <button
             type="button"
             onClick={() => setAutoBroadcastSound((v) => !v)}
-            className="min-h-[38px] px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            className="min-h-[38px] px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 border transition-all active:scale-[0.98]"
             style={{
               background: autoBroadcastSound
-                ? 'var(--md-sys-color-secondary-container)'
+                ? 'var(--md-sys-color-primary-container)'
                 : 'var(--md-sys-color-surface-container)',
+              borderColor: autoBroadcastSound
+                ? 'color-mix(in srgb, var(--studio-accent) 40%, transparent)'
+                : 'var(--studio-border)',
               color: autoBroadcastSound
-                ? 'var(--md-sys-color-on-secondary-container)'
+                ? 'var(--md-sys-color-on-primary-container)'
                 : 'var(--md-sys-color-on-surface-variant)',
             }}
           >
-            <MaterialSymbol name="volume_up" className="text-xs" />
+            <MaterialSymbol name={autoBroadcastSound ? 'volume_up' : 'volume_off'} className="text-xs" />
             <span>{autoBroadcastSound ? 'Audio Tx ON' : 'Silent'}</span>
           </button>
 
@@ -845,7 +906,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
             type="button"
             onClick={handleLoopbackSimulateReply}
             disabled={isBroadcasting}
-            className="m3-btn-tonal min-h-[38px] px-3.5 py-1.5 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            className="m3-btn-tonal min-h-[38px] px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
           >
             <MaterialSymbol name="repeat" className="text-xs" />
             <span>Loopback Ping</span>
@@ -854,8 +915,10 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
           <button
             type="button"
             onClick={toggleMicListener}
-            className={`min-h-[38px] px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
-              isListeningMic ? 'bg-rose-500 text-white' : 'm3-btn-filled'
+            className={`min-h-[38px] px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 transition-all active:scale-[0.98] ${
+              isListeningMic
+                ? 'bg-rose-500 text-white border border-rose-400/50 shadow-lg shadow-rose-500/25'
+                : 'm3-btn-filled'
             }`}
           >
             <MaterialSymbol name={isListeningMic ? 'mic_off' : 'hearing'} filled className="text-xs" />
@@ -867,26 +930,28 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       {/* Live 1-Indexed Binary File Streaming Progress Banner */}
       {fileStreamProgress && (
         <div
-          className="shrink-0 mt-3 p-3.5 rounded-2xl text-xs space-y-1.5"
+          className="shrink-0 mt-3 p-3.5 rounded-2xl text-xs space-y-2 border"
           style={{
             background: 'var(--md-sys-color-primary-container)',
+            borderColor: 'color-mix(in srgb, var(--studio-accent) 40%, transparent)',
             color: 'var(--md-sys-color-on-primary-container)',
           }}
         >
-          <div className="flex items-center justify-between font-bold">
+          <div className="flex items-center justify-between font-bold gap-2">
             <span className="truncate">
               Transmitting Wave {fileStreamProgress.current}/{fileStreamProgress.total}:{' '}
               {fileStreamProgress.fileName}
             </span>
-            <span className="font-mono shrink-0">
+            <span className="font-mono tabular-nums shrink-0">
               {formatBytesHuman(fileStreamProgress.transferredBytes)} /{' '}
               {formatBytesHuman(fileStreamProgress.totalBytes)}
             </span>
           </div>
-          <div className="w-full h-2 rounded-full bg-black/20 overflow-hidden">
+          <div className="w-full h-2 rounded-full bg-black/25 overflow-hidden">
             <div
-              className="h-full bg-[var(--md-sys-color-primary)] transition-all"
+              className="h-full transition-all"
               style={{
+                background: 'var(--studio-accent)',
                 width: `${Math.round(
                   (fileStreamProgress.current / Math.max(1, fileStreamProgress.total)) * 100
                 )}%`,
@@ -902,22 +967,47 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
         className="flex-1 min-h-0 overflow-y-auto px-1 sm:px-2 py-4 space-y-4"
       >
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-2.5">
-            <div
-              className="w-14 h-14 rounded-full flex items-center justify-center"
-              style={{
-                background: 'var(--md-sys-color-primary-container)',
-                color: 'var(--md-sys-color-on-primary-container)',
-              }}
-            >
-              <MaterialSymbol name="waves" className="text-2xl" />
+          <div className="h-full flex items-center justify-center p-4">
+            <div className="studio-inset max-w-md w-full p-6 sm:p-7 text-center space-y-4">
+              <div
+                className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center border"
+                style={{
+                  background: 'var(--md-sys-color-primary-container)',
+                  borderColor: 'color-mix(in srgb, var(--studio-accent) 35%, transparent)',
+                  color: 'var(--studio-accent)',
+                  boxShadow: 'var(--studio-top-highlight)',
+                }}
+              >
+                <MaterialSymbol name="waves" className="text-2xl" />
+              </div>
+              <div className="space-y-1.5">
+                <h4 className="text-sm font-bold text-[var(--md-sys-color-on-surface)]">
+                  Zero-Network Sonic Chat &amp; 10MB+ File Stream
+                </h4>
+                <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] leading-relaxed">
+                  Send encrypted-length text, record cross-browser WAV voice notes, or drop any file to broadcast over 48kHz sound waves.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={toggleMicListener}
+                  className="m3-btn-filled px-4 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MaterialSymbol name="hearing" filled className="text-xs" />
+                  <span>Start Listening</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoopbackSimulateReply}
+                  disabled={isBroadcasting}
+                  className="m3-btn-tonal px-4 py-2 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MaterialSymbol name="repeat" className="text-xs" />
+                  <span>Loopback Ping</span>
+                </button>
+              </div>
             </div>
-            <h4 className="text-sm font-bold text-[var(--md-sys-color-on-surface)]">
-              Zero-Network Sonic Chat & 10MB+ File Stream
-            </h4>
-            <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] max-w-xs leading-relaxed">
-              Send a message or attach a <strong>10MB+ binary file</strong> below to broadcast it over sound waves, or tap <strong>Loopback Ping</strong>.
-            </p>
           </div>
         ) : (
           messages.map((msg) => {
@@ -928,15 +1018,17 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
                 className={`flex flex-col ${isSelf ? 'items-end' : 'items-start'}`}
               >
                 <div className="flex items-center gap-1.5 mb-1 px-2 text-[11px] text-[var(--md-sys-color-on-surface-variant)]">
-                  <span className="font-bold">
+                  <span className="font-semibold">
                     {isSelf ? senderName : msg.senderName || 'Acoustic Peer'}
                   </span>
                   <span>·</span>
-                  <span className="font-mono opacity-75">{formatTime(msg.timestamp)}</span>
+                  <span className="font-mono tabular-nums opacity-75">
+                    {formatTime(msg.timestamp)}
+                  </span>
                 </div>
 
                 <div
-                  className={`max-w-[88%] sm:max-w-[74%] px-4 py-3 text-xs sm:text-sm space-y-2 ${
+                  className={`max-w-[90%] sm:max-w-[78%] lg:max-w-[68%] px-4 py-3 text-xs sm:text-sm space-y-2 border ${
                     isSelf
                       ? 'rounded-3xl rounded-br-lg'
                       : 'rounded-3xl rounded-bl-lg'
@@ -944,10 +1036,14 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
                   style={{
                     background: isSelf
                       ? 'var(--md-sys-color-primary-container)'
-                      : 'var(--md-sys-color-surface-container-high)',
+                      : 'var(--md-sys-color-surface-container)',
+                    borderColor: isSelf
+                      ? 'color-mix(in srgb, var(--studio-accent) 34%, transparent)'
+                      : 'var(--studio-border)',
                     color: isSelf
                       ? 'var(--md-sys-color-on-primary-container)'
                       : 'var(--md-sys-color-on-surface)',
+                    boxShadow: 'var(--studio-top-highlight)',
                   }}
                 >
                   {msg.audioData ? (
@@ -960,7 +1056,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
                     <div className="space-y-2">
                       {msg.filePayload.fileBlobUrl &&
                         msg.filePayload.fileMime?.startsWith('image/') && (
-                          <div className="rounded-2xl overflow-hidden bg-black/20 max-h-48 flex items-center justify-center">
+                          <div className="rounded-2xl overflow-hidden bg-black/25 border border-white/10 max-h-48 flex items-center justify-center">
                             <img
                               src={msg.filePayload.fileBlobUrl}
                               alt={msg.filePayload.fileName}
@@ -968,12 +1064,12 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
                             />
                           </div>
                         )}
-                      <div className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-black/15">
+                      <div className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-black/20 border border-white/10">
                         <div className="min-w-0">
-                          <div className="font-extrabold text-xs sm:text-sm truncate">
+                          <div className="font-bold text-xs sm:text-sm truncate">
                             {msg.filePayload.fileName}
                           </div>
-                          <div className="text-[11px] font-mono opacity-80">
+                          <div className="text-[11px] font-mono tabular-nums opacity-80">
                             {formatBytesHuman(msg.filePayload.fileSize)} · CRC{' '}
                             {msg.filePayload.crc} · {msg.filePayload.mode || 'Acoustic Binary'}
                           </div>
@@ -999,7 +1095,7 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
                       <button
                         type="button"
                         onClick={() => playAcousticMessage(msg.text)}
-                        className="text-[11px] font-bold flex items-center gap-1 opacity-80 hover:opacity-100 cursor-pointer"
+                        className="text-[11px] font-semibold flex items-center gap-1 opacity-80 hover:opacity-100 cursor-pointer"
                       >
                         <MaterialSymbol name="volume_up" className="text-xs" />
                         <span>Replay Wave</span>
@@ -1016,17 +1112,23 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
       {/* Pinned Bottom Composer Bar */}
       <form
         onSubmit={handleSend}
-        className="shrink-0 flex items-center gap-1.5 sm:gap-2 p-2 rounded-full mt-1"
-        style={{ background: 'var(--md-sys-color-surface-container-high)' }}
+        className="shrink-0 flex items-center gap-1.5 sm:gap-2 p-2 rounded-full mt-1 border"
+        style={{
+          background: 'var(--md-sys-color-surface-container-lowest)',
+          borderColor: 'var(--studio-border)',
+          boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.25)',
+        }}
       >
         {isRecordingVoice ? (
-          <div className="flex-1 flex items-center justify-between px-4 py-2 rounded-full bg-rose-500/20 text-rose-200 text-xs font-bold">
-            <span>Recording Voice Note ({recordingDuration}s)...</span>
+          <div className="flex-1 flex items-center justify-between px-4 py-2 rounded-full bg-rose-500/20 border border-rose-500/35 text-rose-200 text-xs font-bold">
+            <span className="font-mono tabular-nums">
+              Recording Voice Note ({recordingDuration}s)...
+            </span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => stopVoiceNoteRecording(true)}
-                className="px-3 py-1.5 rounded-full bg-black/25 hover:bg-black/40 text-xs cursor-pointer"
+                className="px-3 py-1.5 rounded-full bg-black/30 hover:bg-black/45 text-xs cursor-pointer"
               >
                 Cancel
               </button>
@@ -1045,8 +1147,9 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
               <button
                 type="button"
                 onClick={startVoiceNoteRecording}
-                className="m3-btn-tonal w-11 h-11 rounded-full flex items-center justify-center shrink-0 cursor-pointer"
+                className="m3-btn-tonal w-10 h-10 rounded-full flex items-center justify-center shrink-0 cursor-pointer"
                 title="Record voice note"
+                aria-label="Record voice note"
               >
                 <MaterialSymbol name="mic" className="text-base" />
               </button>
@@ -1057,8 +1160,9 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
               type="button"
               onClick={() => fileAttachmentInputRef.current?.click()}
               disabled={isBroadcasting}
-              className="m3-btn-tonal w-11 h-11 rounded-full flex items-center justify-center shrink-0 cursor-pointer"
+              className="m3-btn-tonal w-10 h-10 rounded-full flex items-center justify-center shrink-0 cursor-pointer"
               title="Stream 10MB+ Binary File over Sound Waves"
+              aria-label="Attach binary file to broadcast"
             >
               <MaterialSymbol name="upload_file" className="text-base" />
             </button>
@@ -1075,13 +1179,13 @@ export const SecureChatNode: React.FC<SecureChatNodeProps> = ({
               onChange={(e) => setInputText(e.target.value)}
               placeholder="Message over sound waves..."
               maxLength={120}
-              className="flex-1 px-2.5 py-2.5 bg-transparent text-xs sm:text-sm font-mono focus:outline-none min-w-0 placeholder:text-[var(--md-sys-color-on-surface-variant)]"
+              className="flex-1 px-2.5 py-2 bg-transparent text-xs sm:text-sm font-mono focus:outline-none min-w-0 placeholder:text-[var(--md-sys-color-on-surface-variant)]"
               style={{ color: 'var(--md-sys-color-on-surface)' }}
             />
             <button
               type="submit"
               disabled={!inputText.trim()}
-              className="m3-btn-filled min-h-[44px] px-4 sm:px-5 py-2.5 rounded-full text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-40"
+              className="m3-btn-filled min-h-[42px] px-4 sm:px-5 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-40"
             >
               <MaterialSymbol name="surround_sound" filled className="text-sm" />
               <span>Send Wave</span>

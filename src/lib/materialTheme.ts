@@ -116,7 +116,7 @@ export interface MaterialYouConfig {
 }
 
 export const DEFAULT_M3_CONFIG: MaterialYouConfig = {
-  seedColor: '#3B82F6',
+  seedColor: '#6366F1',
   paletteStyle: 'tonal-spot',
   contrastLevel: 'standard',
   surfaceBlur: true,
@@ -129,8 +129,8 @@ export const DEFAULT_M3_CONFIG: MaterialYouConfig = {
 export const DEFAULT_MATERIAL_THEME: MaterialThemeState = {
   mode: 'dark',
   contrast: 'standard',
-  source: 'wallpaper',
-  seedHex: '#3B82F6',
+  source: 'seed',
+  seedHex: '#6366F1',
   wallpaperId: 'pixel-aurora',
   appIconPreset: 'dynamic-adaptive',
   appIconShape: 'squircle',
@@ -138,13 +138,13 @@ export const DEFAULT_MATERIAL_THEME: MaterialThemeState = {
 };
 
 export const MATERIAL_SEED_PRESETS = [
-  { id: 'pixel-blue', name: 'Pixel Blue', hex: '#3B82F6', desc: 'Android 16 Default' },
+  { id: 'electric-indigo', name: 'Electric Indigo', hex: '#6366F1', desc: 'Precision Studio Default' },
+  { id: 'pixel-blue', name: 'Pixel Blue', hex: '#3B82F6', desc: 'Android 16 Blue' },
   { id: 'emerald-mint', name: 'Emerald Mint', hex: '#10B981', desc: 'Acoustic Signal' },
   { id: 'iris-violet', name: 'Iris Violet', hex: '#8B5CF6', desc: 'Ultrasonic Carrier' },
   { id: 'amber-gold', name: 'Amber Gold', hex: '#F59E0B', desc: 'Solar Flare' },
   { id: 'coral-rose', name: 'Coral Rose', hex: '#F43F5E', desc: 'Crimson Pulse' },
   { id: 'cyan-wave', name: 'Cyan Wave', hex: '#06B6D4', desc: 'Harmonic Aqua' },
-  { id: 'sage-olive', name: 'Sage Olive', hex: '#84CC16', desc: 'Organic Moss' },
   { id: 'magenta-bloom', name: 'Magenta Bloom', hex: '#D946EF', desc: 'Expressive Pop' },
 ];
 
@@ -363,73 +363,80 @@ export function applyMaterialThemeToDocument(theme: MaterialThemeState): void {
 
 export function applyMaterialYouTheme(config: MaterialYouConfig, isDark: boolean): void {
   const root = document.documentElement;
-  const { h, s } = hexToHsl(config.seedColor || '#3B82F6');
+  const seedHex = config.seedColor || '#6366F1';
+  const { h, s } = hexToHsl(seedHex);
 
   const pSat = Math.max(45, s);
   const secHue = (h + 15) % 360;
   const secSat = Math.max(18, Math.round(s * 0.45));
   const tertHue = (h + 65) % 360;
   const tertSat = Math.max(30, Math.round(s * 0.75));
-  const neutralSat = Math.min(14, Math.round(s * 0.14));
-  const neutralVarSat = Math.min(22, Math.round(s * 0.24));
+  const neutralSat = Math.min(8, Math.round(s * 0.08));
+  const neutralVarSat = Math.min(14, Math.round(s * 0.14));
   const cBoost = config.contrastLevel === 'high' ? 12 : config.contrastLevel === 'medium' ? 6 : 0;
 
+  root.style.setProperty('--studio-accent', seedHex);
+  root.style.setProperty(
+    '--studio-accent-soft',
+    `color-mix(in srgb, ${seedHex} ${isDark ? '18%' : '12%'}, transparent)`
+  );
+
   if (isDark) {
-    root.style.setProperty('--md-sys-color-primary', hslToHex(h, pSat, Math.min(94, 78 + cBoost)));
-    root.style.setProperty('--md-sys-color-on-primary', hslToHex(h, pSat, Math.max(4, 15 - cBoost)));
-    root.style.setProperty('--md-sys-color-primary-container', hslToHex(h, Math.max(pSat - 10, 0), Math.max(18, 26 - Math.round(cBoost / 2))));
-    root.style.setProperty('--md-sys-color-on-primary-container', hslToHex(h, pSat, Math.min(98, 90 + Math.round(cBoost / 2))));
+    root.style.setProperty('--md-sys-color-primary', hslToHex(h, pSat, Math.min(92, 74 + cBoost)));
+    root.style.setProperty('--md-sys-color-on-primary', '#FFFFFF');
+    root.style.setProperty('--md-sys-color-primary-container', `color-mix(in srgb, ${seedHex} 20%, #121216)`);
+    root.style.setProperty('--md-sys-color-on-primary-container', hslToHex(h, pSat, Math.min(98, 92 + Math.round(cBoost / 2))));
 
     root.style.setProperty('--md-sys-color-secondary', hslToHex(secHue, secSat, Math.min(92, 76 + cBoost)));
     root.style.setProperty('--md-sys-color-on-secondary', hslToHex(secHue, secSat, Math.max(6, 18 - cBoost)));
-    root.style.setProperty('--md-sys-color-secondary-container', hslToHex(secHue, secSat, Math.max(16, 25 - Math.round(cBoost / 2))));
-    root.style.setProperty('--md-sys-color-on-secondary-container', hslToHex(secHue, secSat, Math.min(96, 88 + Math.round(cBoost / 2))));
+    root.style.setProperty('--md-sys-color-secondary-container', 'rgba(255, 255, 255, 0.08)');
+    root.style.setProperty('--md-sys-color-on-secondary-container', '#F4F4F5');
 
     root.style.setProperty('--md-sys-color-tertiary', hslToHex(tertHue, tertSat, Math.min(94, 78 + cBoost)));
     root.style.setProperty('--md-sys-color-on-tertiary', hslToHex(tertHue, tertSat, Math.max(6, 16 - cBoost)));
-    root.style.setProperty('--md-sys-color-tertiary-container', hslToHex(tertHue, tertSat, Math.max(18, 27 - Math.round(cBoost / 2))));
+    root.style.setProperty('--md-sys-color-tertiary-container', hslToHex(tertHue, tertSat, Math.max(16, 22 - Math.round(cBoost / 2))));
     root.style.setProperty('--md-sys-color-on-tertiary-container', hslToHex(tertHue, tertSat, Math.min(97, 90 + Math.round(cBoost / 2))));
 
-    root.style.setProperty('--md-sys-color-surface', hslToHex(h, neutralSat, 6));
-    root.style.setProperty('--md-sys-color-surface-dim', hslToHex(h, neutralSat, 5));
-    root.style.setProperty('--md-sys-color-surface-container-lowest', hslToHex(h, neutralSat, 4));
-    root.style.setProperty('--md-sys-color-surface-container-low', hslToHex(h, neutralSat, 9));
-    root.style.setProperty('--md-sys-color-surface-container', hslToHex(h, neutralSat, 12));
-    root.style.setProperty('--md-sys-color-surface-container-high', hslToHex(h, neutralSat, 16));
-    root.style.setProperty('--md-sys-color-surface-container-highest', hslToHex(h, neutralSat, 21));
+    root.style.setProperty('--md-sys-color-surface', '#09090B');
+    root.style.setProperty('--md-sys-color-surface-dim', '#060608');
+    root.style.setProperty('--md-sys-color-surface-container-lowest', '#070709');
+    root.style.setProperty('--md-sys-color-surface-container-low', '#121216');
+    root.style.setProperty('--md-sys-color-surface-container', '#18181D');
+    root.style.setProperty('--md-sys-color-surface-container-high', '#202027');
+    root.style.setProperty('--md-sys-color-surface-container-highest', '#272730');
 
-    root.style.setProperty('--md-sys-color-on-surface', hslToHex(h, neutralSat, Math.min(99, 92 + cBoost)));
-    root.style.setProperty('--md-sys-color-on-surface-variant', hslToHex(h, neutralVarSat, Math.min(94, 76 + cBoost)));
+    root.style.setProperty('--md-sys-color-on-surface', cBoost > 0 ? '#FFFFFF' : '#F4F4F5');
+    root.style.setProperty('--md-sys-color-on-surface-variant', cBoost > 0 ? '#D4D4D8' : '#A1A1AA');
     root.style.setProperty('--md-sys-color-outline', hslToHex(h, neutralVarSat, Math.min(82, 54 + cBoost)));
-    root.style.setProperty('--md-sys-color-outline-variant', hslToHex(h, neutralVarSat, Math.min(62, 26 + cBoost)));
+    root.style.setProperty('--md-sys-color-outline-variant', cBoost > 0 ? 'rgba(255, 255, 255, 0.18)' : 'rgba(255, 255, 255, 0.1)');
   } else {
-    root.style.setProperty('--md-sys-color-primary', hslToHex(h, pSat, Math.max(18, 40 - cBoost)));
+    root.style.setProperty('--md-sys-color-primary', hslToHex(h, pSat, Math.max(24, 48 - cBoost)));
     root.style.setProperty('--md-sys-color-on-primary', '#FFFFFF');
-    root.style.setProperty('--md-sys-color-primary-container', hslToHex(h, pSat, Math.min(95, 90 - Math.round(cBoost / 2))));
-    root.style.setProperty('--md-sys-color-on-primary-container', hslToHex(h, pSat, Math.max(4, 14 - Math.round(cBoost / 2))));
+    root.style.setProperty('--md-sys-color-primary-container', `color-mix(in srgb, ${seedHex} 14%, #FFFFFF)`);
+    root.style.setProperty('--md-sys-color-on-primary-container', hslToHex(h, pSat, Math.max(8, 20 - Math.round(cBoost / 2))));
 
     root.style.setProperty('--md-sys-color-secondary', hslToHex(secHue, secSat, Math.max(22, 42 - cBoost)));
     root.style.setProperty('--md-sys-color-on-secondary', '#FFFFFF');
-    root.style.setProperty('--md-sys-color-secondary-container', hslToHex(secHue, secSat, 90));
-    root.style.setProperty('--md-sys-color-on-secondary-container', hslToHex(secHue, secSat, 16));
+    root.style.setProperty('--md-sys-color-secondary-container', `color-mix(in srgb, ${seedHex} 10%, #F1F5F9)`);
+    root.style.setProperty('--md-sys-color-on-secondary-container', '#0F172A');
 
     root.style.setProperty('--md-sys-color-tertiary', hslToHex(tertHue, tertSat, Math.max(20, 40 - cBoost)));
     root.style.setProperty('--md-sys-color-on-tertiary', '#FFFFFF');
     root.style.setProperty('--md-sys-color-tertiary-container', hslToHex(tertHue, tertSat, 90));
     root.style.setProperty('--md-sys-color-on-tertiary-container', hslToHex(tertHue, tertSat, 15));
 
-    root.style.setProperty('--md-sys-color-surface', hslToHex(h, neutralSat, 98));
-    root.style.setProperty('--md-sys-color-surface-dim', hslToHex(h, neutralSat, 90));
+    root.style.setProperty('--md-sys-color-surface', '#F8FAFC');
+    root.style.setProperty('--md-sys-color-surface-dim', '#E2E8F0');
     root.style.setProperty('--md-sys-color-surface-container-lowest', '#FFFFFF');
-    root.style.setProperty('--md-sys-color-surface-container-low', hslToHex(h, neutralSat, 96));
-    root.style.setProperty('--md-sys-color-surface-container', hslToHex(h, neutralSat, 93));
-    root.style.setProperty('--md-sys-color-surface-container-high', hslToHex(h, neutralSat, 90));
+    root.style.setProperty('--md-sys-color-surface-container-low', '#FFFFFF');
+    root.style.setProperty('--md-sys-color-surface-container', hslToHex(h, neutralSat, 95));
+    root.style.setProperty('--md-sys-color-surface-container-high', hslToHex(h, neutralSat, 91));
     root.style.setProperty('--md-sys-color-surface-container-highest', hslToHex(h, neutralSat, 86));
 
-    root.style.setProperty('--md-sys-color-on-surface', hslToHex(h, neutralSat, Math.max(2, 10 - cBoost)));
-    root.style.setProperty('--md-sys-color-on-surface-variant', hslToHex(h, neutralVarSat, Math.max(12, 32 - cBoost)));
+    root.style.setProperty('--md-sys-color-on-surface', '#09090B');
+    root.style.setProperty('--md-sys-color-on-surface-variant', cBoost > 0 ? '#27272A' : '#52525B');
     root.style.setProperty('--md-sys-color-outline', hslToHex(h, neutralVarSat, Math.max(22, 48 - cBoost)));
-    root.style.setProperty('--md-sys-color-outline-variant', hslToHex(h, neutralVarSat, Math.max(55, 80 - cBoost)));
+    root.style.setProperty('--md-sys-color-outline-variant', cBoost > 0 ? 'rgba(161, 161, 170, 0.55)' : 'rgba(228, 228, 231, 0.85)');
   }
 }
 

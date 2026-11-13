@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { motion } from 'motion/react';
 import LZString from 'lz-string';
 import { MaterialSymbol } from '../lib/materialTheme';
+import type { StudioToastType } from './layout/ToastContainer';
+import type { LiveStudioTelemetry } from './layout/TelemetryStrip';
 import {
   WAVER_PROTOCOLS,
   WaverProtocolKey,
@@ -45,6 +48,8 @@ interface WaverSonicNodeProps {
   senderName: string;
   onPacketDecoded?: (packet: DecodedAcousticPacket) => void;
   onCacheUpdated?: () => void;
+  onNotify?: (title: string, description?: string, type?: StudioToastType) => void;
+  onTelemetryUpdate?: (telemetry: LiveStudioTelemetry) => void;
 }
 
 const QUICK_PRESETS = [
@@ -107,6 +112,8 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   senderName,
   onPacketDecoded,
   onCacheUpdated,
+  onNotify,
+  onTelemetryUpdate,
 }) => {
   const [engineStatus, setEngineStatus] = useState<WaverEngineStatus>({
     ready: false,
@@ -196,8 +203,60 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   const [liveRmsDb, setLiveRmsDb] = useState<number>(-60);
   const [dominantFreqHz, setDominantFreqHz] = useState<number>(0);
 
+  // Flexible Studio Workspace State (persisted across sessions)
+  const [studioLayout, setStudioLayout] = useState<'split' | 'stacked' | 'tx-focus' | 'rx-focus'>(
+    () => {
+      try {
+        const saved = localStorage.getItem('waver_studio_layout');
+        if (
+          saved === 'split' ||
+          saved === 'stacked' ||
+          saved === 'tx-focus' ||
+          saved === 'rx-focus'
+        ) {
+          return saved;
+        }
+      } catch {
+        // Ignore
+      }
+      return 'split';
+    }
+  );
+  const [swapPanes, setSwapPanes] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('waver_swap_panes') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [splitRatio, setSplitRatio] = useState<number>(() => {
+    try {
+      const val = Number(localStorage.getItem('waver_split_ratio'));
+      if (!isNaN(val) && val >= 35 && val <= 72) return val;
+    } catch {
+      // Ignore
+    }
+    return 56;
+  });
+  const [visualizerHeight, setVisualizerHeight] = useState<number>(() => {
+    try {
+      const val = Number(localStorage.getItem('waver_visualizer_height'));
+      if (!isNaN(val) && val >= 110 && val <= 360) return val;
+    } catch {
+      // Ignore
+    }
+    return 168;
+  });
+  const [isVisualizerCollapsed, setIsVisualizerCollapsed] = useState<boolean>(false);
+  const [showAdvancedTx, setShowAdvancedTx] = useState<boolean>(true);
+  const [isDraggingTxFile, setIsDraggingTxFile] = useState<boolean>(false);
+  const [isDraggingRxWav, setIsDraggingRxWav] = useState<boolean>(false);
+  const [rxFilterQuery, setRxFilterQuery] = useState<string>('');
+
   // Web Audio & Canvas Refs
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasStageRef = useRef<HTMLDivElement | null>(null);
+  const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const waterfallOffscreenRef = useRef<HTMLCanvasElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -230,12 +289,47 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   const widebandChannelRef = useRef<BroadcastChannel | null>(null);
 
   useEffect(() => {
+    try {
+      localStorage.setItem('waver_studio_layout', studioLayout);
+      localStorage.setItem('waver_swap_panes', swapPanes ? '1' : '0');
+      localStorage.setItem('waver_split_ratio', String(splitRatio));
+      localStorage.setItem('waver_visualizer_height', String(visualizerHeight));
+    } catch {
+      // Ignore storage quota
+    }
+  }, [studioLayout, swapPanes, splitRatio, visualizerHeight]);
+
+  useEffect(() => {
     const unsub = subscribeWaverEngineStatus((st) => {
       setEngineStatus(st);
     });
     preloadWaverWasmEngine().catch(() => {});
     return () => unsub();
   }, []);
+
+  useEffect(() => {
+    onTelemetryUpdate?.({
+      decodedCount: decodedPackets.length,
+      isListening,
+      isTransmitting,
+      liveRmsDb,
+      dominantFreqHz,
+      activeBandLabel:
+        activeBand === 'ultrasound'
+          ? '15–19.5 kHz'
+          : activeBand === 'dualtone'
+          ? 'DUAL-TONE'
+          : 'AUDIBLE',
+    });
+  }, [
+    decodedPackets.length,
+    isListening,
+    isTransmitting,
+    liveRmsDb,
+    dominantFreqHz,
+    activeBand,
+    onTelemetryUpdate,
+  ]);
 
   const activeProtocolSpec =
     WAVER_PROTOCOLS.find((p) => p.key === selectedProtocol) || WAVER_PROTOCOLS[1];
@@ -369,12 +463,17 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           blob.size
         )}) · CRC ${crc} Ready to download!`
       );
+      onNotify?.(
+        `Decoded "${fileName}"`,
+        `${formatBytesHuman(blob.size)} · CRC ${crc}`,
+        'success'
+      );
 
       if (onPacketDecoded) {
         onPacketDecoded(packet);
       }
     },
-    [onCacheUpdated, onPacketDecoded]
+    [onCacheUpdated, onNotify, onPacketDecoded]
   );
 
   // Set up Wideband Acoustic BroadcastChannel listener (1-indexed waves 1/N .. N/N, NEVER 0/N!)
@@ -752,6 +851,11 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             : 'WAV File'
         }) · CRC ${packet.crc}`
       );
+      onNotify?.(
+        'Acoustic Packet Decoded',
+        `${formatBytesHuman(packet.byteLength)} · CRC ${packet.crc}`,
+        'success'
+      );
       if (onPacketDecoded) {
         onPacketDecoded(packet);
       }
@@ -759,8 +863,37 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     [activeProtocolSpec.shortLabel, finalizeReceivedBinaryFile, onPacketDecoded]
   );
 
+  // Adaptive Canvas ResizeObserver so Wave, Spectrum, and Waterfall always render crisp at any viewport or custom height
+  useEffect(() => {
+    const stageEl = canvasStageRef.current;
+    const canvas = canvasRef.current;
+    if (!stageEl || !canvas) return;
+
+    const syncCanvasDimensions = () => {
+      const rect = stageEl.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const targetW = Math.max(320, Math.round(rect.width * dpr));
+      const targetH = Math.max(100, Math.round(rect.height * dpr));
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+    };
+
+    syncCanvasDimensions();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(syncCanvasDimensions);
+      ro.observe(stageEl);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', syncCanvasDimensions);
+    return () => window.removeEventListener('resize', syncCanvasDimensions);
+  }, [visualizerHeight, isVisualizerCollapsed]);
+
   // Real-time 60 FPS Canvas Visualizer Loop (Spectrum, Waterfall, and Adaptive Oscilloscope Wave Graph)
   useEffect(() => {
+    if (isVisualizerCollapsed) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -1057,7 +1190,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         cancelAnimationFrame(animFrameRef.current);
       }
     };
-  }, [visualizerMode, activeProtocolSpec, isTransmitting, isListening]);
+  }, [visualizerMode, activeProtocolSpec, isTransmitting, isListening, isVisualizerCollapsed]);
 
   // Hardware & DSP half-duplex guard: mutes mic tracks during speaker playback and flushes ggwave ring buffer after
   const setHalfDuplexTxState = useCallback((transmitting: boolean) => {
@@ -1487,8 +1620,10 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
       setStatusBannerMsg(
         `Exported 48kHz 16-bit PCM WAV (${encoded.durationSeconds}s) & cached offline.`
       );
+      onNotify?.('Exported PCM WAV', `${fileName} (${encoded.durationSeconds}s)`, 'success');
     } catch (err: any) {
       setStatusBannerMsg(`WAV export failed: ${err?.message}`);
+      onNotify?.('WAV Export Failed', err?.message, 'error');
     }
   };
 
@@ -1592,12 +1727,8 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     }
   };
 
-  // Attach ANY binary file (including 10MB+ files) without truncating or corrupting!
-  const handleAttachFileForSound = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = '';
-
+  // Direct File Attachment helper for both file picker and drag-and-drop
+  const attachFileForSound = useCallback(async (file: File) => {
     setAttachedFile(file);
     if (file.size > 1024) {
       setFileSonicMode('wideband-ofdm');
@@ -1612,44 +1743,97 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           file.size
         )}) · Ready for 1-indexed sound wave stream (CRC ${crc}).`
       );
+      onNotify?.('File Attached', `${file.name} (${formatBytesHuman(file.size)})`, 'info');
     } catch {
       setAttachedFileCrc('A1F0');
     }
+  }, [onNotify]);
+
+  // Attach ANY binary file (including 10MB+ files) without truncating or corrupting!
+  const handleAttachFileForSound = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    await attachFileForSound(file);
   };
+
+  const decodeAudioFileFromUpload = useCallback(
+    async (file: File) => {
+      try {
+        const arrayBuf = await file.arrayBuffer();
+        const audioCtx = ensureAudioContext();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+        const channelData = audioBuffer.getChannelData(0);
+
+        let samples48k = channelData;
+        if (audioBuffer.sampleRate !== 48000) {
+          const ratio = 48000 / audioBuffer.sampleRate;
+          const newLen = Math.round(channelData.length * ratio);
+          samples48k = new Float32Array(newLen);
+          for (let i = 0; i < newLen; i++) {
+            const srcIdx = Math.min(channelData.length - 1, Math.floor(i / ratio));
+            samples48k[i] = channelData[srcIdx];
+          }
+        }
+
+        const messages = await decodeWaverFullBuffer(samples48k, useDSS, fixedPayloadLength);
+        if (messages.length === 0) {
+          setStatusBannerMsg(`No valid ggwave FSK frames detected in "${file.name}".`);
+        } else {
+          for (const msg of messages) {
+            await handleRawDecodedText(msg, 'wav-file');
+          }
+        }
+      } catch (err: any) {
+        setStatusBannerMsg(`Could not decode audio file "${file.name}": ${err?.message}`);
+      }
+    },
+    [ensureAudioContext, fixedPayloadLength, handleRawDecodedText, useDSS]
+  );
 
   const handleDecodeUploadedWav = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
+    await decodeAudioFileFromUpload(file);
+  };
 
-    try {
-      const arrayBuf = await file.arrayBuffer();
-      const audioCtx = ensureAudioContext();
-      const audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
-      const channelData = audioBuffer.getChannelData(0);
+  // Interactive Drag Handlers for Visualizer Height & Split-Pane Proportions
+  const startVisualizerResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = visualizerHeight;
 
-      let samples48k = channelData;
-      if (audioBuffer.sampleRate !== 48000) {
-        const ratio = 48000 / audioBuffer.sampleRate;
-        const newLen = Math.round(channelData.length * ratio);
-        samples48k = new Float32Array(newLen);
-        for (let i = 0; i < newLen; i++) {
-          const srcIdx = Math.min(channelData.length - 1, Math.floor(i / ratio));
-          samples48k[i] = channelData[srcIdx];
-        }
-      }
+    const onMove = (ev: PointerEvent) => {
+      const next = Math.max(110, Math.min(360, Math.round(startHeight + (ev.clientY - startY))));
+      setVisualizerHeight(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
 
-      const messages = await decodeWaverFullBuffer(samples48k, useDSS, fixedPayloadLength);
-      if (messages.length === 0) {
-        setStatusBannerMsg(`No valid ggwave FSK frames detected in "${file.name}".`);
-      } else {
-        for (const msg of messages) {
-          await handleRawDecodedText(msg, 'wav-file');
-        }
-      }
-    } catch (err: any) {
-      setStatusBannerMsg(`Could not decode audio file "${file.name}": ${err?.message}`);
-    }
+  const startSplitPaneResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const container = splitContainerRef.current;
+    if (!container) return;
+
+    const onMove = (ev: PointerEvent) => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      const adjusted = swapPanes ? 100 - pct : pct;
+      setSplitRatio(Math.max(35, Math.min(72, Math.round(adjusted))));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   };
 
   const payloadByteCount = attachedFile
@@ -1666,41 +1850,131 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     ? 1
     : splitIntoAcousticFrames(payloadText || ' ').length;
 
+  const filteredDecodedPackets = rxFilterQuery.trim()
+    ? decodedPackets.filter((pkt) => {
+        const q = rxFilterQuery.toLowerCase();
+        return (
+          pkt.text.toLowerCase().includes(q) ||
+          (pkt.fileName && pkt.fileName.toLowerCase().includes(q)) ||
+          pkt.crc.toLowerCase().includes(q)
+        );
+      })
+    : decodedPackets;
+
+  const showTxPane = studioLayout !== 'rx-focus';
+  const showRxPane = studioLayout !== 'tx-focus';
+  const isSideBySideSplit = studioLayout === 'split';
+
   return (
-    <div className="space-y-6">
-      {/* Unified Organic Acoustic Stage (Visualizer + Live Telemetry + Mic Rx Toggle) */}
-      <section
-        className="rounded-[32px] p-4 sm:p-6 space-y-4 overflow-hidden relative"
-        style={{ background: 'var(--md-sys-color-surface-container-low)' }}
-      >
-        {/* Top Row: Title + Unboxed Metadata + Primary Mic Rx Action */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-0.5">
+    <div className="space-y-5">
+      {/* Unified Precision Studio Acoustic Stage (Visualizer + Live Telemetry + Mic Rx Toggle) */}
+      <section className="studio-card p-4 sm:p-6 space-y-4 overflow-hidden relative">
+        {/* Top Row: Title + Live Telemetry + Flexible Layout Controls & Mic Rx Action */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="space-y-1 min-w-0">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--md-sys-color-on-surface-variant)]">
-              <span className="font-semibold text-[var(--md-sys-color-primary)]">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-[var(--studio-accent)]">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    engineStatus.ready ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'
+                  }`}
+                />
                 {engineStatus.ready
                   ? `WASM Ready (${engineStatus.initTimeMs}ms)`
                   : 'Loading WASM...'}
               </span>
               <span aria-hidden="true">·</span>
-              <span>48,000 Hz Float32</span>
+              <span className="font-mono tabular-nums">48,000 Hz Float32</span>
               <span aria-hidden="true">·</span>
-              <span>{activeProtocolSpec.freqRange}</span>
+              <span className="font-mono tabular-nums">{activeProtocolSpec.freqRange}</span>
               <span aria-hidden="true">·</span>
-              <span className="font-mono">
+              <span className="font-mono tabular-nums">
                 {dominantFreqHz > 0 ? `${dominantFreqHz} Hz` : 'Idle'} / {liveRmsDb} dBFS
               </span>
             </div>
-            <h2 className="text-lg sm:text-xl font-extrabold tracking-tight text-[var(--md-sys-color-on-surface)]">
+            <h2 className="text-lg sm:text-xl font-bold tracking-tight text-[var(--md-sys-color-on-surface)]">
               Waver Acoustic Transceiver
             </h2>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-auto">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Flexible Workspace View Mode Switcher with Animated Pill */}
+            <div
+              className="inline-flex p-1 rounded-full gap-0.5 border"
+              style={{
+                background: 'var(--md-sys-color-surface-container-lowest)',
+                borderColor: 'var(--studio-border)',
+              }}
+              title="Arrange Studio Panes"
+            >
+              {(
+                [
+                  { id: 'split', label: 'Split', icon: 'vertical_split', desktopOnly: true },
+                  { id: 'stacked', label: 'Stack', icon: 'view_agenda', desktopOnly: false },
+                  { id: 'tx-focus', label: 'Tx', icon: 'surround_sound', desktopOnly: false },
+                  { id: 'rx-focus', label: 'Rx', icon: 'graphic_eq', desktopOnly: false },
+                ] as const
+              ).map((mode) => {
+                const active = studioLayout === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => setStudioLayout(mode.id)}
+                    className={`relative ${
+                      mode.desktopOnly ? 'hidden lg:inline-flex' : 'inline-flex'
+                    } min-h-[32px] px-3 py-1 rounded-full text-[11px] font-semibold items-center gap-1 cursor-pointer whitespace-nowrap z-0`}
+                    style={{
+                      color: active
+                        ? '#FFFFFF'
+                        : 'var(--md-sys-color-on-surface-variant)',
+                    }}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId="waver-layout-pill"
+                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                        className="absolute inset-0 rounded-full -z-10"
+                        style={{ background: 'var(--studio-accent)' }}
+                      />
+                    )}
+                    <MaterialSymbol name={mode.icon} className="text-xs" />
+                    <span>{mode.label}</span>
+                  </button>
+                );
+              })}
+
+              {studioLayout === 'split' && (
+                <button
+                  type="button"
+                  onClick={() => setSwapPanes((v) => !v)}
+                  className="hidden lg:inline-flex min-h-[32px] px-2 py-1 rounded-full text-[11px] font-semibold items-center justify-center transition-colors hover:bg-white/10 text-[var(--md-sys-color-on-surface-variant)] cursor-pointer"
+                  title="Swap Transmitter & Receiver Sides"
+                >
+                  <MaterialSymbol name="swap_horiz" className="text-sm" />
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsVisualizerCollapsed((v) => !v)}
+              className="m3-btn-tonal min-h-[38px] px-3 py-1.5 text-xs font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+              title={isVisualizerCollapsed ? 'Show Acoustic Visualizer' : 'Minimize Visualizer'}
+            >
+              <MaterialSymbol
+                name={isVisualizerCollapsed ? 'expand_more' : 'expand_less'}
+                className="text-sm"
+              />
+              <span className="hidden sm:inline">
+                {isVisualizerCollapsed ? 'Show Graph' : 'Minimize'}
+              </span>
+            </button>
+
             <button
               type="button"
               onClick={() => wavDecodeInputRef.current?.click()}
-              className="m3-btn-tonal min-h-[42px] px-4 py-2 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              className="m3-btn-tonal min-h-[38px] px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
             >
               <MaterialSymbol name="upload_file" className="text-sm" />
               <span>Decode .WAV</span>
@@ -1716,9 +1990,9 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             <button
               type="button"
               onClick={toggleMicrophoneListener}
-              className={`min-h-[42px] px-4 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+              className={`min-h-[38px] px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap active:scale-[0.98] ${
                 isListening
-                  ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/25'
+                  ? 'bg-rose-500 text-white border border-rose-400/50 shadow-lg shadow-rose-500/25'
                   : 'm3-btn-filled'
               }`}
             >
@@ -1728,69 +2002,90 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           </div>
         </div>
 
-        {/* Seamless Rounded Visualizer Stage */}
-        <div
-          className="relative rounded-[24px] overflow-hidden"
-          style={{ background: 'var(--md-sys-color-surface-container-lowest)' }}
-        >
-          {/* Floating Mode Pill Switcher inside Canvas Corner */}
-          <div
-            className="absolute top-3 right-3 z-10 inline-flex p-1 rounded-full gap-0.5 backdrop-blur-md"
-            style={{
-              backgroundColor:
-                'color-mix(in srgb, var(--md-sys-color-surface-container-high) 82%, transparent)',
-            }}
-          >
-            {(
-              [
-                { id: 'spectrum', label: 'Spectrum' },
-                { id: 'waterfall', label: 'Waterfall' },
-                { id: 'waveform', label: 'Wave' },
-              ] as const
-            ).map((mode) => {
-              const active = visualizerMode === mode.id;
-              return (
-                <button
-                  key={mode.id}
-                  type="button"
-                  onClick={() => setVisualizerMode(mode.id)}
-                  className="px-3 py-1 rounded-full text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap"
-                  style={{
-                    background: active ? 'var(--md-sys-color-primary)' : 'transparent',
-                    color: active
-                      ? 'var(--md-sys-color-on-primary)'
-                      : 'var(--md-sys-color-on-surface-variant)',
-                  }}
-                >
-                  {mode.label}
-                </button>
-              );
-            })}
-          </div>
+        {/* Seamless Rounded & Vertically Resizable Visualizer Stage */}
+        {!isVisualizerCollapsed && (
+          <div className="studio-inset relative overflow-hidden select-none">
+            {/* Floating Mode Pill Switcher inside Canvas Corner */}
+            <div
+              className="absolute top-3 right-3 z-10 inline-flex p-1 rounded-full gap-0.5 backdrop-blur-md border"
+              style={{
+                backgroundColor:
+                  'color-mix(in srgb, var(--md-sys-color-surface-container-low) 84%, transparent)',
+                borderColor: 'var(--studio-border)',
+              }}
+            >
+              {(
+                [
+                  { id: 'spectrum', label: 'Spectrum' },
+                  { id: 'waterfall', label: 'Waterfall' },
+                  { id: 'waveform', label: 'Wave' },
+                ] as const
+              ).map((mode) => {
+                const active = visualizerMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => setVisualizerMode(mode.id)}
+                    className="relative px-3 py-1 rounded-full text-[11px] font-semibold cursor-pointer whitespace-nowrap z-0"
+                    style={{
+                      color: active
+                        ? '#FFFFFF'
+                        : 'var(--md-sys-color-on-surface-variant)',
+                    }}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId="visualizer-mode-pill"
+                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                        className="absolute inset-0 rounded-full -z-10"
+                        style={{ background: 'var(--studio-accent)' }}
+                      />
+                    )}
+                    {mode.label}
+                  </button>
+                );
+              })}
+            </div>
 
-          <canvas
-            ref={canvasRef}
-            width={720}
-            height={164}
-            className="w-full h-36 sm:h-44 block"
-          />
+            <div
+              ref={canvasStageRef}
+              className="w-full relative"
+              style={{ height: `${visualizerHeight}px` }}
+            >
+              <canvas ref={canvasRef} className="w-full h-full block" />
+            </div>
 
-          {/* Subtle Unboxed Frequency Legend */}
-          <div className="px-4 pb-2.5 pt-1 flex items-center justify-between text-[10px] font-mono text-[var(--md-sys-color-on-surface-variant)] opacity-80">
-            <span>0 Hz</span>
-            <span className="text-emerald-400">1.8–6.3 kHz Audible</span>
-            <span className="hidden sm:inline">12 kHz</span>
-            <span className="text-violet-400">15–19.5 kHz Ultrasonic</span>
-            <span>24 kHz</span>
+            {/* Frequency Legend */}
+            <div
+              className="px-4 pb-1.5 pt-1.5 flex items-center justify-between text-[10px] font-mono tabular-nums text-[var(--md-sys-color-on-surface-variant)] border-t"
+              style={{ borderColor: 'var(--studio-border)' }}
+            >
+              <span>0 Hz</span>
+              <span className="text-emerald-400">1.8–6.3 kHz Audible</span>
+              <span className="hidden sm:inline">12 kHz</span>
+              <span className="text-violet-400">15–19.5 kHz Ultrasonic</span>
+              <span>24 kHz</span>
+            </div>
+
+            {/* Interactive Bottom Resize Handle */}
+            <div
+              onPointerDown={startVisualizerResize}
+              className="h-3.5 w-full flex items-center justify-center cursor-ns-resize hover:bg-white/5 transition-colors group"
+              title="Drag vertically to resize graph height"
+            >
+              <div className="w-10 h-1 rounded-full bg-[var(--md-sys-color-outline-variant-solid)] opacity-60 group-hover:opacity-100 group-hover:w-16 transition-all" />
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Live 1-Indexed File / Multi-Wave Transmission Progress Bar */}
         {txProgress && (
           <div
-            className="p-4 rounded-3xl space-y-2"
+            className="p-4 rounded-2xl space-y-2 border"
             style={{
               background: 'var(--md-sys-color-primary-container)',
+              borderColor: 'color-mix(in srgb, var(--studio-accent) 40%, transparent)',
               color: 'var(--md-sys-color-on-primary-container)',
             }}
           >
@@ -1803,7 +2098,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                     : `Transmitting Wave ${txProgress.currentFrame} of ${txProgress.totalFrames}`}
                 </span>
               </div>
-              <span className="font-mono">
+              <span className="font-mono tabular-nums">
                 {txProgress.transferredBytes !== undefined && txProgress.totalBytes
                   ? `Wave ${txProgress.currentFrame}/${txProgress.totalFrames} · ${formatBytesHuman(
                       txProgress.transferredBytes
@@ -1811,10 +2106,11 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                   : `Wave ${txProgress.currentFrame}/${txProgress.totalFrames}`}
               </span>
             </div>
-            <div className="w-full h-2.5 rounded-full bg-black/20 overflow-hidden">
+            <div className="w-full h-2 rounded-full bg-black/25 overflow-hidden">
               <div
-                className="h-full bg-[var(--md-sys-color-primary)] transition-all duration-150"
+                className="h-full transition-all duration-150"
                 style={{
+                  background: 'var(--studio-accent)',
                   width: `${Math.min(
                     100,
                     Math.round((txProgress.currentFrame / Math.max(1, txProgress.totalFrames)) * 100)
@@ -1825,21 +2121,22 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           </div>
         )}
 
-        {/* Status / Alert Toast */}
+        {/* Status / Alert Pill */}
         {(statusBannerMsg || rxError) && (
           <div
-            className="px-4 py-2.5 rounded-full text-xs font-medium flex items-center justify-between gap-3"
+            className="px-4 py-2.5 rounded-2xl text-xs font-medium flex items-center justify-between gap-3 border"
             style={{
               background: rxError
-                ? 'rgba(245, 158, 11, 0.16)'
-                : 'var(--md-sys-color-surface-container-high)',
+                ? 'rgba(245, 158, 11, 0.14)'
+                : 'var(--md-sys-color-surface-container)',
+              borderColor: rxError ? 'rgba(245, 158, 11, 0.35)' : 'var(--studio-border)',
               color: rxError ? '#FCD34D' : 'var(--md-sys-color-on-surface)',
             }}
           >
             <div className="flex items-center gap-2 min-w-0">
               <MaterialSymbol
                 name={rxError ? 'info' : 'graphic_eq'}
-                className="text-sm text-[var(--md-sys-color-primary)] shrink-0"
+                className="text-sm text-[var(--studio-accent)] shrink-0"
               />
               <span className="truncate">{rxError || statusBannerMsg}</span>
             </div>
@@ -1850,6 +2147,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
                 setRxError(null);
               }}
               className="opacity-70 hover:opacity-100 shrink-0 cursor-pointer"
+              aria-label="Dismiss status message"
             >
               <MaterialSymbol name="close" className="text-xs" />
             </button>
@@ -1857,663 +2155,830 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         )}
       </section>
 
-      {/* Main Responsive Split: Left = Transmitter Studio, Right = Decoded Acoustic Stream */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left Column: Transmitter Studio (7 cols) */}
-        <div
-          className="lg:col-span-7 rounded-[32px] p-4 sm:p-6 space-y-5"
-          style={{ background: 'var(--md-sys-color-surface-container-low)' }}
-        >
-          {/* Header + File to Sound Trigger */}
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <h3 className="text-base font-bold text-[var(--md-sys-color-on-surface)]">
-                Transmit Sound Wave
-              </h3>
-              <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
-                {attachedFile
-                  ? `Binary File Stream · ${formatBytesHuman(attachedFile.size)} (1-Indexed Waves)`
-                  : `${activeProtocolSpec.label} · ~${activeProtocolSpec.speedBytesPerSec} B/s · ${activeProtocolSpec.eccOverhead}`}
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="m3-btn-tonal min-h-[40px] px-3.5 py-1.5 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-              title="Attach any binary file (10MB+ supported) to stream over sound waves"
-            >
-              <MaterialSymbol name="upload_file" className="text-sm" />
-              <span>File to Sound (10MB+)</span>
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              onChange={handleAttachFileForSound}
-              className="hidden"
-            />
-          </div>
-
-          {/* Step 1: Ergonomic 3-Band Pill Selector */}
-          <div className="space-y-3">
+      {/* Main Flexible Workspace: Resizable Split, Vertical Stack, or Focused Tx/Rx */}
+      <div
+        ref={splitContainerRef}
+        className={`flex flex-col ${
+          isSideBySideSplit
+            ? swapPanes
+              ? 'lg:flex-row-reverse'
+              : 'lg:flex-row'
+            : ''
+        } gap-5 lg:gap-0 items-stretch`}
+      >
+        {/* Pane A: Transmitter Studio */}
+        {showTxPane && (
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingTxFile(true);
+            }}
+            onDragLeave={() => setIsDraggingTxFile(false)}
+            onDrop={async (e) => {
+              e.preventDefault();
+              setIsDraggingTxFile(false);
+              const file = e.dataTransfer.files?.[0];
+              if (file) await attachFileForSound(file);
+            }}
+            style={{
+              flexBasis:
+                isSideBySideSplit && showRxPane ? `calc(${splitRatio}% - 10px)` : '100%',
+            }}
+            className={`studio-card-hover p-4 sm:p-6 space-y-5 min-w-0 flex-1 transition-all ${
+              isDraggingTxFile
+                ? 'ring-2 ring-[var(--studio-accent)] ring-offset-2 ring-offset-[var(--md-sys-color-surface)]'
+                : ''
+            }`}
+          >
+            {/* Header + File to Sound Trigger */}
             <div
-              className="grid grid-cols-3 p-1.5 rounded-full gap-1"
-              style={{ background: 'var(--md-sys-color-surface-container)' }}
+              className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b"
+              style={{ borderColor: 'var(--studio-border)' }}
             >
-              {(
-                [
-                  {
-                    id: 'audible',
-                    label: 'Audible',
-                    sub: '1.8–6.3 kHz',
-                    icon: 'volume_up',
-                  },
-                  {
-                    id: 'ultrasound',
-                    label: 'Ultrasound',
-                    sub: '15–19.5 kHz',
-                    icon: 'waves',
-                  },
-                  {
-                    id: 'dualtone',
-                    label: 'Dual-Tone',
-                    sub: 'IoT / MCU',
-                    icon: 'memory',
-                  },
-                ] as const
-              ).map((band) => {
-                const active = activeBand === band.id;
-                return (
-                  <button
-                    key={band.id}
-                    type="button"
-                    onClick={() => setActiveBand(band.id)}
-                    className="min-h-[44px] py-2 px-3 rounded-full text-center transition-all cursor-pointer flex flex-col items-center justify-center"
-                    style={{
-                      background: active
-                        ? 'var(--md-sys-color-primary-container)'
-                        : 'transparent',
-                      color: active
-                        ? 'var(--md-sys-color-on-primary-container)'
-                        : 'var(--md-sys-color-on-surface-variant)',
-                    }}
-                  >
-                    <div className="flex items-center gap-1 text-xs font-bold whitespace-nowrap">
-                      <MaterialSymbol name={band.icon} filled={active} className="text-xs" />
-                      <span>{band.label}</span>
-                    </div>
-                    <span className="text-[10px] opacity-75 hidden sm:inline">{band.sub}</span>
-                  </button>
-                );
-              })}
+              <div className="min-w-0">
+                <h3 className="text-base font-bold text-[var(--md-sys-color-on-surface)]">
+                  Transmit Sound Wave
+                </h3>
+                <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] truncate">
+                  {attachedFile
+                    ? `Binary File Stream · ${formatBytesHuman(attachedFile.size)} (1-Indexed Waves)`
+                    : `${activeProtocolSpec.label} · ~${activeProtocolSpec.speedBytesPerSec} B/s · ${activeProtocolSpec.eccOverhead}`}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedTx((v) => !v)}
+                  className="m3-btn-tonal min-h-[38px] px-3 py-1.5 text-xs font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                  title="Toggle Protocol & Gain Controls"
+                >
+                  <MaterialSymbol name="tune" className="text-sm" />
+                  <span className="hidden sm:inline">{showAdvancedTx ? 'Less' : 'Tuning'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="m3-btn-tonal min-h-[38px] px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  title="Attach or drop any binary file (10MB+ supported) to stream over sound waves"
+                >
+                  <MaterialSymbol name="upload_file" className="text-sm text-[var(--studio-accent)]" />
+                  <span>File to Sound</span>
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={handleAttachFileForSound}
+                className="hidden"
+              />
             </div>
 
-            {/* Step 2: Speed Tier Pills + Spread Spectrum (DSS) + Gain Slider */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            {/* Step 1: Ergonomic 3-Band Pill Selector */}
+            <div className="space-y-3">
               <div
-                className="inline-flex p-1 rounded-full gap-1"
-                style={{ background: 'var(--md-sys-color-surface-container)' }}
+                className="grid grid-cols-3 p-1 rounded-2xl gap-1 border"
+                style={{
+                  background: 'var(--md-sys-color-surface-container-lowest)',
+                  borderColor: 'var(--studio-border)',
+                }}
               >
                 {(
                   [
-                    { id: 'NORMAL', label: 'Normal' },
-                    { id: 'FAST', label: 'Fast' },
-                    { id: 'FASTEST', label: 'Fastest' },
+                    {
+                      id: 'audible',
+                      label: 'Audible',
+                      sub: '1.8–6.3 kHz',
+                      icon: 'volume_up',
+                    },
+                    {
+                      id: 'ultrasound',
+                      label: 'Ultrasound',
+                      sub: '15–19.5 kHz',
+                      icon: 'waves',
+                    },
+                    {
+                      id: 'dualtone',
+                      label: 'Dual-Tone',
+                      sub: 'IoT / MCU',
+                      icon: 'memory',
+                    },
                   ] as const
-                ).map((sp) => {
-                  const active = activeSpeed === sp.id;
+                ).map((band) => {
+                  const active = activeBand === band.id;
                   return (
                     <button
-                      key={sp.id}
+                      key={band.id}
                       type="button"
-                      onClick={() => setActiveSpeed(sp.id)}
-                      className="min-h-[36px] px-3.5 py-1 rounded-full text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
+                      onClick={() => setActiveBand(band.id)}
+                      className="relative min-h-[44px] py-2 px-2 sm:px-3 rounded-xl text-center cursor-pointer flex flex-col items-center justify-center z-0"
                       style={{
-                        background: active
-                          ? 'var(--md-sys-color-secondary-container)'
-                          : 'transparent',
                         color: active
-                          ? 'var(--md-sys-color-on-secondary-container)'
+                          ? '#FFFFFF'
                           : 'var(--md-sys-color-on-surface-variant)',
                       }}
                     >
-                      {sp.label}
+                      {active && (
+                        <motion.span
+                          layoutId="tx-band-pill"
+                          transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                          className="absolute inset-0 rounded-xl -z-10"
+                          style={{ background: 'var(--studio-accent)' }}
+                        />
+                      )}
+                      <div className="flex items-center gap-1 text-xs font-semibold whitespace-nowrap">
+                        <MaterialSymbol name={band.icon} filled={active} className="text-xs" />
+                        <span>{band.label}</span>
+                      </div>
+                      <span className="text-[10px] font-mono tabular-nums opacity-80 hidden sm:inline">
+                        {band.sub}
+                      </span>
                     </button>
                   );
                 })}
               </div>
 
-              <button
-                type="button"
-                onClick={() => setUseDSS((v) => !v)}
-                className="min-h-[36px] px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap"
-                style={{
-                  background: useDSS
-                    ? 'var(--md-sys-color-tertiary-container)'
-                    : 'var(--md-sys-color-surface-container)',
-                  color: useDSS
-                    ? 'var(--md-sys-color-on-tertiary-container)'
-                    : 'var(--md-sys-color-on-surface-variant)',
-                }}
-              >
-                <MaterialSymbol name={useDSS ? 'check_circle' : 'tune'} className="text-xs" />
-                <span>{useDSS ? 'DSS Spread Spectrum ON' : 'Standard FSK'}</span>
-              </button>
+              {/* Collapsible Step 2: Speed Tier Pills + Spread Spectrum (DSS) + Gain Slider */}
+              {showAdvancedTx && (
+                <div className="space-y-3 pt-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2.5">
+                    <div
+                      className="inline-flex p-1 rounded-full gap-1 border"
+                      style={{
+                        background: 'var(--md-sys-color-surface-container-lowest)',
+                        borderColor: 'var(--studio-border)',
+                      }}
+                    >
+                      {(
+                        [
+                          { id: 'NORMAL', label: 'Normal' },
+                          { id: 'FAST', label: 'Fast' },
+                          { id: 'FASTEST', label: 'Fastest' },
+                        ] as const
+                      ).map((sp) => {
+                        const active = activeSpeed === sp.id;
+                        return (
+                          <button
+                            key={sp.id}
+                            type="button"
+                            onClick={() => setActiveSpeed(sp.id)}
+                            className="min-h-[32px] px-3.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer whitespace-nowrap"
+                            style={{
+                              background: active ? 'var(--studio-accent)' : 'transparent',
+                              color: active
+                                ? '#FFFFFF'
+                                : 'var(--md-sys-color-on-surface-variant)',
+                            }}
+                          >
+                            {sp.label}
+                          </button>
+                        );
+                      })}
+                    </div>
 
-              <select
-                value={fixedPayloadLength}
-                onChange={(e) => setFixedPayloadLength(Number(e.target.value))}
-                className="min-h-[36px] px-3.5 py-1.5 rounded-full text-xs font-bold cursor-pointer focus:outline-none"
-                style={{
-                  background: 'var(--md-sys-color-surface-container)',
-                  color: 'var(--md-sys-color-on-surface)',
-                }}
-              >
-                <option value={-1}>Auto Multi-Frame</option>
-                <option value={16}>Fixed 16B</option>
-                <option value={32}>Fixed 32B</option>
-                <option value={64}>Fixed 64B</option>
-              </select>
-            </div>
+                    <button
+                      type="button"
+                      onClick={() => setUseDSS((v) => !v)}
+                      className="min-h-[36px] px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap border"
+                      style={{
+                        background: useDSS
+                          ? 'var(--md-sys-color-tertiary-container)'
+                          : 'var(--md-sys-color-surface-container)',
+                        borderColor: useDSS
+                          ? 'color-mix(in srgb, var(--md-sys-color-tertiary) 40%, transparent)'
+                          : 'var(--studio-border)',
+                        color: useDSS
+                          ? 'var(--md-sys-color-on-tertiary-container)'
+                          : 'var(--md-sys-color-on-surface-variant)',
+                      }}
+                    >
+                      <MaterialSymbol name={useDSS ? 'check_circle' : 'tune'} className="text-xs" />
+                      <span>{useDSS ? 'DSS Spread Spectrum ON' : 'Standard FSK'}</span>
+                    </button>
 
-            {/* Smooth Gain Slider Row */}
-            <div className="flex items-center gap-3 px-1">
-              <MaterialSymbol
-                name="volume_up"
-                className="text-sm text-[var(--md-sys-color-on-surface-variant)]"
-              />
-              <span className="text-xs font-medium text-[var(--md-sys-color-on-surface-variant)] whitespace-nowrap">
-                Output Gain
-              </span>
-              <input
-                type="range"
-                min={5}
-                max={100}
-                value={txVolume}
-                onChange={(e) => setTxVolume(Number(e.target.value))}
-                className="flex-1 accent-[var(--md-sys-color-primary)] h-1.5 rounded-full cursor-pointer"
-              />
-              <span className="text-xs font-mono font-bold text-[var(--md-sys-color-primary)] w-10 text-right">
-                {txVolume}%
-              </span>
-            </div>
-          </div>
+                    <select
+                      value={fixedPayloadLength}
+                      onChange={(e) => setFixedPayloadLength(Number(e.target.value))}
+                      className="min-h-[36px] px-3.5 py-1.5 rounded-full text-xs font-semibold cursor-pointer focus:outline-none border"
+                      style={{
+                        background: 'var(--md-sys-color-surface-container)',
+                        borderColor: 'var(--studio-border)',
+                        color: 'var(--md-sys-color-on-surface)',
+                      }}
+                      aria-label="Payload frame mode"
+                    >
+                      <option value={-1}>Auto Multi-Frame</option>
+                      <option value={16}>Fixed 16B</option>
+                      <option value={32}>Fixed 32B</option>
+                      <option value={64}>Fixed 64B</option>
+                    </select>
+                  </div>
 
-          {/* Attached Binary File Card (Supports 10MB+ full binary streaming) */}
-          {attachedFile ? (
-            <div
-              className="rounded-[24px] p-4 space-y-3"
-              style={{
-                background: 'var(--md-sys-color-surface-container)',
-              }}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
+                  {/* Smooth Gain Slider Row */}
                   <div
-                    className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
-                    style={{
-                      background: 'var(--md-sys-color-primary-container)',
-                      color: 'var(--md-sys-color-on-primary-container)',
-                    }}
-                  >
-                    <MaterialSymbol name="upload_file" className="text-xl" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs sm:text-sm font-extrabold truncate text-[var(--md-sys-color-on-surface)]">
-                      {attachedFile.name}
-                    </div>
-                    <div className="text-[11px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
-                      {formatBytesHuman(attachedFile.size)} ({attachedFile.size.toLocaleString()}{' '}
-                      bytes) · {attachedFile.type || guessMimeFromFileName(attachedFile.name)} · CRC{' '}
-                      {attachedFileCrc}
-                    </div>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setAttachedFile(null)}
-                  className="px-3 py-1 rounded-full text-xs font-bold text-rose-400 hover:bg-rose-500/10 cursor-pointer shrink-0"
-                >
-                  Remove File
-                </button>
-              </div>
-
-              {/* Acoustic Binary Streaming Mode Selector */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setFileSonicMode('wideband-ofdm')}
-                  className="p-3 rounded-2xl text-left transition-all cursor-pointer"
-                  style={{
-                    background:
-                      fileSonicMode === 'wideband-ofdm'
-                        ? 'var(--md-sys-color-secondary-container)'
-                        : 'var(--md-sys-color-surface-container-lowest)',
-                    color:
-                      fileSonicMode === 'wideband-ofdm'
-                        ? 'var(--md-sys-color-on-secondary-container)'
-                        : 'var(--md-sys-color-on-surface-variant)',
-                  }}
-                >
-                  <div className="flex items-center justify-between text-xs font-bold">
-                    <span>Turbo ggwave Sonic (10MB+)</span>
-                    <MaterialSymbol name="bolt" className="text-sm" />
-                  </div>
-                  <p className="text-[10px] opacity-80 mt-0.5">
-                    Real ggwave WASM waves (1/{turboWaveCount}..{turboWaveCount}/{turboWaveCount}) ·
-                    Bit-exact uncorrupted reconstruction
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setFileSonicMode('ggwave-fsk')}
-                  className="p-3 rounded-2xl text-left transition-all cursor-pointer"
-                  style={{
-                    background:
-                      fileSonicMode === 'ggwave-fsk'
-                        ? 'var(--md-sys-color-secondary-container)'
-                        : 'var(--md-sys-color-surface-container-lowest)',
-                    color:
-                      fileSonicMode === 'ggwave-fsk'
-                        ? 'var(--md-sys-color-on-secondary-container)'
-                        : 'var(--md-sys-color-on-surface-variant)',
-                  }}
-                >
-                  <div className="flex items-center justify-between text-xs font-bold">
-                    <span>Raw FSK Byte Stream</span>
-                    <MaterialSymbol name="graphic_eq" className="text-sm" />
-                  </div>
-                  <p className="text-[10px] opacity-80 mt-0.5">
-                    48B/wave Reed-Solomon ECC ·{' '}
-                    {Math.max(1, Math.ceil(attachedFile.size / 48)).toLocaleString()} sequential
-                    1-indexed waves
-                  </p>
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              {/* Horizontal Scrollable Quick Presets */}
-              <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide pb-0.5 -mx-1 px-1">
-                {QUICK_PRESETS.map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    onClick={() => {
-                      setPayloadText(preset.text);
-                      setAttachedFile(null);
-                    }}
-                    className="min-h-[36px] px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    className="flex items-center gap-3 px-3.5 py-2.5 rounded-2xl border"
                     style={{
                       background: 'var(--md-sys-color-surface-container)',
-                      color: 'var(--md-sys-color-on-surface)',
+                      borderColor: 'var(--studio-border)',
                     }}
                   >
                     <MaterialSymbol
-                      name={preset.icon}
-                      className="text-xs text-[var(--md-sys-color-primary)]"
+                      name="volume_up"
+                      className="text-sm text-[var(--md-sys-color-on-surface-variant)]"
                     />
-                    <span>{preset.label}</span>
+                    <span className="text-xs font-semibold text-[var(--md-sys-color-on-surface-variant)] whitespace-nowrap">
+                      Output Gain
+                    </span>
+                    <input
+                      type="range"
+                      min={5}
+                      max={100}
+                      value={txVolume}
+                      onChange={(e) => setTxVolume(Number(e.target.value))}
+                      className="flex-1 studio-range"
+                      aria-label="Output transmit gain percentage"
+                    />
+                    <span className="text-xs font-mono font-bold tabular-nums text-[var(--studio-accent)] w-10 text-right">
+                      {txVolume}%
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Attached Binary File Card (Supports 10MB+ full binary streaming) */}
+            {attachedFile ? (
+              <div
+                className="rounded-2xl p-4 space-y-3 border"
+                style={{
+                  background: 'var(--md-sys-color-surface-container)',
+                  borderColor: 'var(--studio-border)',
+                }}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div
+                      className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border"
+                      style={{
+                        background: 'var(--md-sys-color-primary-container)',
+                        borderColor: 'color-mix(in srgb, var(--studio-accent) 30%, transparent)',
+                        color: 'var(--studio-accent)',
+                      }}
+                    >
+                      <MaterialSymbol name="upload_file" className="text-xl" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs sm:text-sm font-bold truncate text-[var(--md-sys-color-on-surface)]">
+                        {attachedFile.name}
+                      </div>
+                      <div className="text-[11px] font-mono tabular-nums text-[var(--md-sys-color-on-surface-variant)]">
+                        {formatBytesHuman(attachedFile.size)} ({attachedFile.size.toLocaleString()}{' '}
+                        bytes) · {attachedFile.type || guessMimeFromFileName(attachedFile.name)} · CRC{' '}
+                        {attachedFileCrc}
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setAttachedFile(null)}
+                    className="px-3 py-1 rounded-full text-xs font-semibold text-rose-400 hover:bg-rose-500/10 border border-rose-500/20 cursor-pointer shrink-0"
+                  >
+                    Remove File
+                  </button>
+                </div>
+
+                {/* Acoustic Binary Streaming Mode Selector */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setFileSonicMode('wideband-ofdm')}
+                    className="p-3 rounded-xl text-left transition-all cursor-pointer border"
+                    style={{
+                      background:
+                        fileSonicMode === 'wideband-ofdm'
+                          ? 'var(--md-sys-color-primary-container)'
+                          : 'var(--md-sys-color-surface-container-lowest)',
+                      borderColor:
+                        fileSonicMode === 'wideband-ofdm'
+                          ? 'var(--studio-accent)'
+                          : 'var(--studio-border)',
+                      color:
+                        fileSonicMode === 'wideband-ofdm'
+                          ? 'var(--md-sys-color-on-primary-container)'
+                          : 'var(--md-sys-color-on-surface-variant)',
+                    }}
+                  >
+                    <div className="flex items-center justify-between text-xs font-bold">
+                      <span>Turbo ggwave Sonic (10MB+)</span>
+                      <MaterialSymbol name="bolt" className="text-sm" />
+                    </div>
+                    <p className="text-[10px] opacity-80 mt-0.5 font-mono tabular-nums">
+                      Real ggwave WASM waves (1/{turboWaveCount}..{turboWaveCount}/{turboWaveCount}) ·
+                      Bit-exact reconstruction
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFileSonicMode('ggwave-fsk')}
+                    className="p-3 rounded-xl text-left transition-all cursor-pointer border"
+                    style={{
+                      background:
+                        fileSonicMode === 'ggwave-fsk'
+                          ? 'var(--md-sys-color-primary-container)'
+                          : 'var(--md-sys-color-surface-container-lowest)',
+                      borderColor:
+                        fileSonicMode === 'ggwave-fsk'
+                          ? 'var(--studio-accent)'
+                          : 'var(--studio-border)',
+                      color:
+                        fileSonicMode === 'ggwave-fsk'
+                          ? 'var(--md-sys-color-on-primary-container)'
+                          : 'var(--md-sys-color-on-surface-variant)',
+                    }}
+                  >
+                    <div className="flex items-center justify-between text-xs font-bold">
+                      <span>Raw FSK Byte Stream</span>
+                      <MaterialSymbol name="graphic_eq" className="text-sm" />
+                    </div>
+                    <p className="text-[10px] opacity-80 mt-0.5 font-mono tabular-nums">
+                      48B/wave Reed-Solomon ECC ·{' '}
+                      {Math.max(1, Math.ceil(attachedFile.size / 48)).toLocaleString()} sequential
+                      1-indexed waves
+                    </p>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Horizontal Scrollable Quick Presets */}
+                <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide pb-0.5 -mx-1 px-1">
+                  {QUICK_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => {
+                        setPayloadText(preset.text);
+                        setAttachedFile(null);
+                      }}
+                      className="m3-btn-tonal min-h-[34px] px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <MaterialSymbol
+                        name={preset.icon}
+                        className="text-xs text-[var(--studio-accent)]"
+                      />
+                      <span>{preset.label}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Inset Studio Composer Surface (Vertically Resizable + Drop Target) */}
+                <div className="studio-inset p-4 space-y-2 focus-within:border-[var(--studio-accent)] transition-colors">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--md-sys-color-on-surface-variant)] pb-2 border-b border-[var(--studio-border)]">
+                    <span className="font-semibold">
+                      {isDraggingTxFile ? 'Drop file to stream via sound...' : 'Payload Message'}
+                    </span>
+                    <span className="font-mono tabular-nums">
+                      {formatBytesHuman(payloadByteCount)} · {estimatedFrameCount} wave
+                      {estimatedFrameCount > 1 ? 's' : ''} · CRC {crc16Hex(payloadText || '')}
+                    </span>
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={payloadText}
+                    onChange={(e) => {
+                      setPayloadText(e.target.value);
+                    }}
+                    placeholder="Type text, JSON, or drag & drop any file here to modulate into sound waves..."
+                    className="w-full bg-transparent text-xs sm:text-sm font-mono resize-y min-h-[82px] focus:outline-none leading-relaxed"
+                    style={{ color: 'var(--md-sys-color-on-surface)' }}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Touch-First Action Bar */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+              <button
+                type="button"
+                onClick={handleTransmitSoundWave}
+                disabled={!engineStatus.ready || (!attachedFile && !payloadText.trim())}
+                className={`flex-1 min-h-[48px] py-3 px-6 rounded-full text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-[0.98] disabled:opacity-45 ${
+                  isTransmitting
+                    ? 'bg-rose-500 text-white border border-rose-400/50 shadow-lg shadow-rose-500/25'
+                    : 'm3-btn-filled'
+                }`}
+              >
+                <MaterialSymbol
+                  name={isTransmitting ? 'stop' : 'surround_sound'}
+                  filled
+                  className="text-lg"
+                />
+                <span>
+                  {isTransmitting
+                    ? txProgress
+                      ? `Wave ${txProgress.currentFrame}/${txProgress.totalFrames}... Stop`
+                      : 'Stop Broadcast'
+                    : attachedFile
+                    ? `Stream Binary File (${formatBytesHuman(attachedFile.size)})`
+                    : 'Broadcast Sound Wave'}
+                </span>
+              </button>
+
+              <div className="grid grid-cols-2 sm:flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleAcousticLoopbackTest}
+                  disabled={
+                    !engineStatus.ready || (!attachedFile && !payloadText.trim()) || isTransmitting
+                  }
+                  className="m3-btn-tonal min-h-[46px] py-2.5 px-4 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-45"
+                  title="Modulate and decode immediately in memory"
+                >
+                  <MaterialSymbol name="repeat" className="text-sm" />
+                  <span>Loopback Test</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExportWavFile}
+                  disabled={!engineStatus.ready || !payloadText.trim()}
+                  className="m3-btn-tonal min-h-[46px] py-2.5 px-4 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-45"
+                  title="Download 48kHz 16-bit PCM .WAV audio file"
+                >
+                  <MaterialSymbol name="download" className="text-sm" />
+                  <span>Save .WAV</span>
+                </button>
+              </div>
+            </div>
+
+            {lastEncodedInfo && (
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2 text-[11px] font-mono tabular-nums text-[var(--md-sys-color-on-surface-variant)]">
+                <span>Waveform: {lastEncodedInfo.durationSeconds}s @ 48kHz</span>
+                <span>·</span>
+                <span>
+                  {formatBytesHuman(lastEncodedInfo.byteLength)} ({lastEncodedInfo.frameCount} wave
+                  {lastEncodedInfo.frameCount > 1 ? 's' : ''})
+                </span>
+                <span>·</span>
+                <span>Peak {lastEncodedInfo.peakAmplitude} F32</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Interactive Split-Pane Resize Divider (Desktop Split Mode Only) */}
+        {isSideBySideSplit && showTxPane && showRxPane && (
+          <div
+            onPointerDown={startSplitPaneResize}
+            onDoubleClick={() => setSplitRatio(56)}
+            className="hidden lg:flex w-5 shrink-0 items-center justify-center cursor-col-resize group select-none"
+            title="Drag horizontally to resize panels (double-click to reset)"
+          >
+            <div className="w-1 h-16 rounded-full bg-[var(--md-sys-color-outline-variant-solid)] opacity-50 group-hover:opacity-100 group-hover:h-24 group-hover:bg-[var(--studio-accent)] transition-all" />
+          </div>
+        )}
+
+        {/* Pane B: Receiver Stream */}
+        {showRxPane && (
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingRxWav(true);
+            }}
+            onDragLeave={() => setIsDraggingRxWav(false)}
+            onDrop={async (e) => {
+              e.preventDefault();
+              setIsDraggingRxWav(false);
+              const file = e.dataTransfer.files?.[0];
+              if (file) await decodeAudioFileFromUpload(file);
+            }}
+            style={{
+              flexBasis:
+                isSideBySideSplit && showTxPane ? `calc(${100 - splitRatio}% - 10px)` : '100%',
+            }}
+            className={`studio-card-hover p-4 sm:p-6 space-y-4 min-w-0 flex-1 flex flex-col transition-all ${
+              isDraggingRxWav
+                ? 'ring-2 ring-[var(--studio-accent)] ring-offset-2 ring-offset-[var(--md-sys-color-surface)]'
+                : ''
+            }`}
+          >
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b"
+              style={{ borderColor: 'var(--studio-border)' }}
+            >
+              <div className="min-w-0">
+                <h3 className="text-base font-bold text-[var(--md-sys-color-on-surface)]">
+                  Decoded Acoustic Stream
+                </h3>
+                <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
+                  {isDraggingRxWav
+                    ? 'Drop .WAV or audio file to decode offline...'
+                    : isListening
+                    ? 'Live 48kHz microphone capture active (1-indexed wave sync)'
+                    : 'Ready for live mic, file stream, or dropped .WAV'}
+                </p>
+              </div>
+
+              {decodedPackets.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDecodedPackets([]);
+                    setRxFilterQuery('');
+                    onNotify?.('Cleared Decoded Stream', undefined, 'info');
+                  }}
+                  className="px-3 py-1.5 rounded-full text-xs font-semibold text-rose-400 hover:bg-rose-500/10 border border-rose-500/20 flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <MaterialSymbol name="delete_sweep" className="text-sm" />
+                  <span>Clear</span>
+                </button>
+              )}
+            </div>
+
+            {/* Rx Band Filter Pills + Optional Search Filter */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
+                <span className="text-xs font-semibold text-[var(--md-sys-color-on-surface-variant)] mr-1 shrink-0">
+                  Bands:
+                </span>
+                {[
+                  {
+                    label: 'Audible',
+                    active: rxBandAudible,
+                    toggle: () => setRxBandAudible((v) => !v),
+                  },
+                  {
+                    label: 'Ultrasound',
+                    active: rxBandUltrasound,
+                    toggle: () => setRxBandUltrasound((v) => !v),
+                  },
+                  {
+                    label: 'Dual-Tone',
+                    active: rxBandDualTone,
+                    toggle: () => setRxBandDualTone((v) => !v),
+                  },
+                ].map((band) => (
+                  <button
+                    key={band.label}
+                    type="button"
+                    onClick={band.toggle}
+                    className="min-h-[32px] px-3 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 border"
+                    style={{
+                      background: band.active
+                        ? 'var(--md-sys-color-primary-container)'
+                        : 'var(--md-sys-color-surface-container)',
+                      borderColor: band.active
+                        ? 'color-mix(in srgb, var(--studio-accent) 40%, transparent)'
+                        : 'var(--studio-border)',
+                      color: band.active
+                        ? 'var(--md-sys-color-on-primary-container)'
+                        : 'var(--md-sys-color-on-surface-variant)',
+                    }}
+                  >
+                    {band.label}
                   </button>
                 ))}
               </div>
 
-              {/* Soft Borderless Composer Surface */}
-              <div
-                className="rounded-[24px] p-4 space-y-2"
-                style={{ background: 'var(--md-sys-color-surface-container-lowest)' }}
-              >
-                <div className="flex items-center justify-between text-[11px] text-[var(--md-sys-color-on-surface-variant)]">
-                  <span className="font-semibold">Payload Message</span>
-                  <span className="font-mono">
-                    {formatBytesHuman(payloadByteCount)} · {estimatedFrameCount} wave
-                    {estimatedFrameCount > 1 ? 's' : ''} · CRC {crc16Hex(payloadText || '')}
-                  </span>
-                </div>
-                <textarea
-                  rows={3}
-                  value={payloadText}
-                  onChange={(e) => {
-                    setPayloadText(e.target.value);
+              {decodedPackets.length > 2 && (
+                <input
+                  type="search"
+                  value={rxFilterQuery}
+                  onChange={(e) => setRxFilterQuery(e.target.value)}
+                  placeholder="Filter stream..."
+                  className="min-h-[34px] px-3 py-1 rounded-full text-xs focus:outline-none w-full sm:w-40 border"
+                  style={{
+                    background: 'var(--md-sys-color-surface-container-lowest)',
+                    borderColor: 'var(--studio-border)',
+                    color: 'var(--md-sys-color-on-surface)',
                   }}
-                  placeholder="Type text, JSON, or key to modulate into sound waves, or tap 'File to Sound (10MB+)' above..."
-                  className="w-full bg-transparent text-xs sm:text-sm font-mono resize-none focus:outline-none leading-relaxed"
-                  style={{ color: 'var(--md-sys-color-on-surface)' }}
                 />
-              </div>
-            </>
-          )}
-
-          {/* Touch-First Action Bar */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
-            <button
-              type="button"
-              onClick={handleTransmitSoundWave}
-              disabled={!engineStatus.ready || (!attachedFile && !payloadText.trim())}
-              className={`flex-1 min-h-[50px] py-3.5 px-6 rounded-full text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-[0.98] ${
-                isTransmitting
-                  ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/25'
-                  : 'm3-btn-filled shadow-md'
-              }`}
-            >
-              <MaterialSymbol
-                name={isTransmitting ? 'stop' : 'surround_sound'}
-                filled
-                className="text-lg"
-              />
-              <span>
-                {isTransmitting
-                  ? txProgress
-                    ? `Wave ${txProgress.currentFrame}/${txProgress.totalFrames}... Stop`
-                    : 'Stop Broadcast'
-                  : attachedFile
-                  ? `Stream Binary File (${formatBytesHuman(attachedFile.size)})`
-                  : 'Broadcast Sound Wave'}
-              </span>
-            </button>
-
-            <div className="grid grid-cols-2 sm:flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleAcousticLoopbackTest}
-                disabled={
-                  !engineStatus.ready || (!attachedFile && !payloadText.trim()) || isTransmitting
-                }
-                className="m3-btn-tonal min-h-[48px] py-3 px-4 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
-                title="Modulate and decode immediately in memory"
-              >
-                <MaterialSymbol name="repeat" className="text-sm" />
-                <span>Loopback Test</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleExportWavFile}
-                disabled={!engineStatus.ready || !payloadText.trim()}
-                className="m3-btn-tonal min-h-[48px] py-3 px-4 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
-                title="Download 48kHz 16-bit PCM .WAV audio file"
-              >
-                <MaterialSymbol name="download" className="text-sm" />
-                <span>Save .WAV</span>
-              </button>
-            </div>
-          </div>
-
-          {lastEncodedInfo && (
-            <div className="flex flex-wrap items-center justify-between gap-2 px-2 text-[11px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
-              <span>Waveform: {lastEncodedInfo.durationSeconds}s @ 48kHz</span>
-              <span>·</span>
-              <span>
-                {formatBytesHuman(lastEncodedInfo.byteLength)} ({lastEncodedInfo.frameCount} wave
-                {lastEncodedInfo.frameCount > 1 ? 's' : ''})
-              </span>
-              <span>·</span>
-              <span>Peak {lastEncodedInfo.peakAmplitude} F32</span>
-            </div>
-          )}
-        </div>
-
-        {/* Right Column: Receiver Stream (5 cols) */}
-        <div
-          className="lg:col-span-5 rounded-[32px] p-4 sm:p-6 space-y-4"
-          style={{ background: 'var(--md-sys-color-surface-container-low)' }}
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <h3 className="text-base font-bold text-[var(--md-sys-color-on-surface)]">
-                Decoded Acoustic Stream
-              </h3>
-              <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
-                {isListening
-                  ? 'Live 48kHz microphone capture active (1-indexed wave sync)'
-                  : 'Ready for live mic, 10MB+ file stream, or .WAV'}
-              </p>
+              )}
             </div>
 
-            {decodedPackets.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setDecodedPackets([])}
-                className="px-3 py-1.5 rounded-full text-xs font-semibold text-[var(--md-sys-color-on-surface-variant)] hover:text-rose-400 flex items-center gap-1 cursor-pointer"
-              >
-                <MaterialSymbol name="delete_sweep" className="text-sm" />
-                <span>Clear</span>
-              </button>
-            )}
-          </div>
-
-          {/* Rx Band Filter Pills */}
-          <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
-            <span className="text-xs font-medium text-[var(--md-sys-color-on-surface-variant)] mr-1 shrink-0">
-              Listen Bands:
-            </span>
-            {[
-              {
-                label: 'Audible',
-                active: rxBandAudible,
-                toggle: () => setRxBandAudible((v) => !v),
-              },
-              {
-                label: 'Ultrasound',
-                active: rxBandUltrasound,
-                toggle: () => setRxBandUltrasound((v) => !v),
-              },
-              {
-                label: 'Dual-Tone',
-                active: rxBandDualTone,
-                toggle: () => setRxBandDualTone((v) => !v),
-              },
-            ].map((band) => (
-              <button
-                key={band.label}
-                type="button"
-                onClick={band.toggle}
-                className="min-h-[34px] px-3.5 py-1 rounded-full text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+            {/* 1-Indexed Multi-Wave / Binary Reassembly Progress (Starts at 1/N on Wave 1, NEVER 0/N!) */}
+            {partialFrameStatus && (
+              <div
+                className="p-4 rounded-2xl text-xs space-y-2 border"
                 style={{
-                  background: band.active
-                    ? 'var(--md-sys-color-secondary-container)'
-                    : 'var(--md-sys-color-surface-container)',
-                  color: band.active
-                    ? 'var(--md-sys-color-on-secondary-container)'
-                    : 'var(--md-sys-color-on-surface-variant)',
+                  background: 'var(--md-sys-color-primary-container)',
+                  borderColor: 'color-mix(in srgb, var(--studio-accent) 40%, transparent)',
+                  color: 'var(--md-sys-color-on-primary-container)',
                 }}
               >
-                {band.label}
-              </button>
-            ))}
-          </div>
-
-          {/* 1-Indexed Multi-Wave / Binary Reassembly Progress (Starts at 1/N on Wave 1, NEVER 0/N!) */}
-          {partialFrameStatus && (
-            <div
-              className="p-4 rounded-3xl text-xs space-y-2"
-              style={{
-                background: 'var(--md-sys-color-primary-container)',
-                color: 'var(--md-sys-color-on-primary-container)',
-              }}
-            >
-              <div className="flex items-center justify-between font-bold gap-2">
-                <span className="truncate">
-                  Receiving {partialFrameStatus.label || `CRC ${partialFrameStatus.crc}`}
-                </span>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="font-mono">
-                    Wave {partialFrameStatus.received}/{partialFrameStatus.total}
+                <div className="flex items-center justify-between font-bold gap-2">
+                  <span className="truncate">
+                    Receiving {partialFrameStatus.label || `CRC ${partialFrameStatus.crc}`}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPartialFrameStatus(null);
-                      binaryStreamBufferRef.current.clear();
-                      multiFrameBufferRef.current.clear();
-                    }}
-                    className="p-1 rounded-full hover:bg-black/15 cursor-pointer"
-                    title="Dismiss reassembly status"
-                  >
-                    <MaterialSymbol name="close" className="text-xs" />
-                  </button>
-                </div>
-              </div>
-              <div className="w-full h-2 rounded-full bg-black/20 overflow-hidden">
-                <div
-                  className="h-full bg-[var(--md-sys-color-primary)] transition-all"
-                  style={{
-                    width: `${Math.round(
-                      (partialFrameStatus.received / Math.max(1, partialFrameStatus.total)) * 100
-                    )}%`,
-                  }}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Decoded Packets Stream */}
-          <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
-            {decodedPackets.length === 0 ? (
-              <div
-                className="p-8 rounded-[28px] text-center space-y-2.5"
-                style={{ background: 'var(--md-sys-color-surface-container)' }}
-              >
-                <div
-                  className="w-12 h-12 rounded-full mx-auto flex items-center justify-center"
-                  style={{
-                    background: 'var(--md-sys-color-primary-container)',
-                    color: 'var(--md-sys-color-on-primary-container)',
-                  }}
-                >
-                  <MaterialSymbol name="graphic_eq" className="text-xl" />
-                </div>
-                <p className="text-sm font-bold text-[var(--md-sys-color-on-surface)]">
-                  Waiting for Acoustic Signal
-                </p>
-                <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] max-w-xs mx-auto leading-relaxed">
-                  Attach a 10MB+ file or type a message and tap{' '}
-                  <strong>Broadcast Sound Wave</strong>, or tap <strong>Listen (Mic Rx)</strong>.
-                </p>
-              </div>
-            ) : (
-              decodedPackets.map((pkt) => (
-                <div
-                  key={pkt.id}
-                  className="p-4 rounded-[24px] space-y-2.5"
-                  style={{ background: 'var(--md-sys-color-surface-container)' }}
-                >
-                  {/* Unboxed Metadata Line */}
-                  <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-[var(--md-sys-color-on-surface-variant)]">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-[var(--md-sys-color-primary)]">
-                        {pkt.source === 'microphone'
-                          ? 'Live Mic'
-                          : pkt.source === 'loopback'
-                          ? 'Acoustic Rx'
-                          : 'WAV File'}
-                      </span>
-                      <span>·</span>
-                      <span className="font-mono">{formatBytesHuman(pkt.byteLength)}</span>
-                      <span>·</span>
-                      <span className="font-mono">CRC {pkt.crc}</span>
-                      {pkt.frameInfo && (
-                        <>
-                          <span>·</span>
-                          <span className="text-emerald-400 font-semibold">{pkt.frameInfo}</span>
-                        </>
-                      )}
-                    </div>
-                    <span className="font-mono">
-                      {new Date(pkt.timestamp).toLocaleTimeString()}
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="font-mono tabular-nums">
+                      Wave {partialFrameStatus.received}/{partialFrameStatus.total}
                     </span>
-                  </div>
-
-                  {/* Reconstructed Binary File Card (with Image Preview if image/*) OR Decoded Text */}
-                  {pkt.isFilePayload && pkt.fileName ? (
-                    <div className="space-y-2.5">
-                      {pkt.fileBlobUrl && pkt.fileMime?.startsWith('image/') && (
-                        <div className="rounded-2xl overflow-hidden bg-black/20 max-h-48 flex items-center justify-center">
-                          <img
-                            src={pkt.fileBlobUrl}
-                            alt={pkt.fileName}
-                            className="max-h-48 w-auto object-contain"
-                          />
-                        </div>
-                      )}
-                      <div
-                        className="p-3.5 rounded-2xl flex items-center justify-between gap-3"
-                        style={{
-                          background: 'var(--md-sys-color-primary-container)',
-                          color: 'var(--md-sys-color-on-primary-container)',
-                        }}
-                      >
-                        <div className="min-w-0">
-                          <div className="text-xs sm:text-sm font-extrabold truncate">
-                            {pkt.fileName}
-                          </div>
-                          <div className="text-[11px] font-mono opacity-85">
-                            {formatBytesHuman(pkt.fileSize || pkt.byteLength)} ·{' '}
-                            {pkt.fileMime || 'application/octet-stream'} · 100% Verified
-                          </div>
-                        </div>
-                        {pkt.fileBlobUrl && (
-                          <a
-                            href={pkt.fileBlobUrl}
-                            download={pkt.fileName}
-                            className="m3-btn-filled px-3.5 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer"
-                          >
-                            <MaterialSymbol name="download" className="text-xs" />
-                            <span>Download</span>
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="font-mono text-xs sm:text-sm break-all leading-relaxed text-[var(--md-sys-color-on-surface)]">
-                      {pkt.text}
-                    </p>
-                  )}
-
-                  {/* Pill Action Row */}
-                  <div className="flex items-center justify-end gap-2 pt-1">
-                    {!pkt.isFilePayload && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPayloadText(pkt.text);
-                          setAttachedFile(null);
-                          setStatusBannerMsg('Loaded decoded payload into Transmitter.');
-                        }}
-                        className="px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 cursor-pointer"
-                        style={{
-                          background: 'var(--md-sys-color-surface-container-high)',
-                          color: 'var(--md-sys-color-on-surface)',
-                        }}
-                      >
-                        <MaterialSymbol name="replay" className="text-xs" />
-                        <span>Relay</span>
-                      </button>
-                    )}
-
                     <button
                       type="button"
                       onClick={() => {
-                        navigator.clipboard.writeText(pkt.fileContent || pkt.text);
-                        setCopiedId(pkt.id);
-                        setTimeout(() => setCopiedId(null), 1500);
+                        setPartialFrameStatus(null);
+                        binaryStreamBufferRef.current.clear();
+                        multiFrameBufferRef.current.clear();
                       }}
-                      className="px-3.5 py-1.5 rounded-full text-xs font-bold m3-btn-tonal flex items-center gap-1 cursor-pointer"
+                      className="p-1 rounded-full hover:bg-black/15 cursor-pointer"
+                      title="Dismiss reassembly status"
                     >
-                      <MaterialSymbol
-                        name={copiedId === pkt.id ? 'check' : 'content_copy'}
-                        className="text-xs"
-                      />
-                      <span>{copiedId === pkt.id ? 'Copied' : 'Copy'}</span>
+                      <MaterialSymbol name="close" className="text-xs" />
                     </button>
                   </div>
                 </div>
-              ))
+                <div className="w-full h-2 rounded-full bg-black/25 overflow-hidden">
+                  <div
+                    className="h-full transition-all"
+                    style={{
+                      background: 'var(--studio-accent)',
+                      width: `${Math.round(
+                        (partialFrameStatus.received / Math.max(1, partialFrameStatus.total)) * 100
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
             )}
+
+            {/* Decoded Packets Stream */}
+            <div className="space-y-3 flex-1 max-h-[520px] overflow-y-auto pr-1">
+              {filteredDecodedPackets.length === 0 ? (
+                <div className="studio-inset p-7 sm:p-8 text-center space-y-4">
+                  <div
+                    className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center border"
+                    style={{
+                      background: 'var(--md-sys-color-primary-container)',
+                      borderColor: 'color-mix(in srgb, var(--studio-accent) 35%, transparent)',
+                      color: 'var(--studio-accent)',
+                      boxShadow: 'var(--studio-top-highlight)',
+                    }}
+                  >
+                    <MaterialSymbol name="graphic_eq" className="text-2xl" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-sm font-bold text-[var(--md-sys-color-on-surface)]">
+                      {rxFilterQuery ? 'No Matching Waves' : 'Waiting for Acoustic Signal'}
+                    </p>
+                    <p className="text-xs text-[var(--md-sys-color-on-surface-variant)] max-w-xs mx-auto leading-relaxed">
+                      {rxFilterQuery
+                        ? 'Clear your search filter or wait for incoming transmissions.'
+                        : 'Activate live microphone listening, run an in-memory loopback check, or drop a .WAV file here.'}
+                    </p>
+                  </div>
+                  {!rxFilterQuery && (
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={toggleMicrophoneListener}
+                        className="m3-btn-filled px-4 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <MaterialSymbol name="mic" filled className="text-xs" />
+                        <span>{isListening ? 'Mic Active' : 'Listen (Mic Rx)'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAcousticLoopbackTest}
+                        disabled={!engineStatus.ready || isTransmitting}
+                        className="m3-btn-tonal px-4 py-2 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-45"
+                      >
+                        <MaterialSymbol name="repeat" className="text-xs" />
+                        <span>Loopback Test</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                filteredDecodedPackets.map((pkt) => (
+                  <div
+                    key={pkt.id}
+                    className="p-4 rounded-2xl space-y-2.5 border transition-colors hover:border-[var(--studio-border-strong)]"
+                    style={{
+                      background: 'var(--md-sys-color-surface-container)',
+                      borderColor: 'var(--studio-border)',
+                      boxShadow: 'var(--studio-top-highlight)',
+                    }}
+                  >
+                    {/* Metadata Line */}
+                    <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-[var(--md-sys-color-on-surface-variant)]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-[var(--studio-accent)]">
+                          {pkt.source === 'microphone'
+                            ? 'Live Mic'
+                            : pkt.source === 'loopback'
+                            ? 'Acoustic Rx'
+                            : 'WAV File'}
+                        </span>
+                        <span>·</span>
+                        <span className="font-mono tabular-nums">
+                          {formatBytesHuman(pkt.byteLength)}
+                        </span>
+                        <span>·</span>
+                        <span className="font-mono tabular-nums">CRC {pkt.crc}</span>
+                        {pkt.frameInfo && (
+                          <>
+                            <span>·</span>
+                            <span className="text-emerald-400 font-semibold">{pkt.frameInfo}</span>
+                          </>
+                        )}
+                      </div>
+                      <span className="font-mono tabular-nums">
+                        {new Date(pkt.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+
+                    {/* Reconstructed Binary File Card OR Decoded Text */}
+                    {pkt.isFilePayload && pkt.fileName ? (
+                      <div className="space-y-2.5">
+                        {pkt.fileBlobUrl && pkt.fileMime?.startsWith('image/') && (
+                          <div className="rounded-2xl overflow-hidden bg-black/25 border border-white/10 max-h-48 flex items-center justify-center">
+                            <img
+                              src={pkt.fileBlobUrl}
+                              alt={pkt.fileName}
+                              className="max-h-48 w-auto object-contain"
+                            />
+                          </div>
+                        )}
+                        <div
+                          className="p-3.5 rounded-2xl flex items-center justify-between gap-3 border"
+                          style={{
+                            background: 'var(--md-sys-color-primary-container)',
+                            borderColor: 'color-mix(in srgb, var(--studio-accent) 35%, transparent)',
+                            color: 'var(--md-sys-color-on-primary-container)',
+                          }}
+                        >
+                          <div className="min-w-0">
+                            <div className="text-xs sm:text-sm font-bold truncate">
+                              {pkt.fileName}
+                            </div>
+                            <div className="text-[11px] font-mono tabular-nums opacity-85">
+                              {formatBytesHuman(pkt.fileSize || pkt.byteLength)} ·{' '}
+                              {pkt.fileMime || 'application/octet-stream'} · 100% Verified
+                            </div>
+                          </div>
+                          {pkt.fileBlobUrl && (
+                            <a
+                              href={pkt.fileBlobUrl}
+                              download={pkt.fileName}
+                              className="m3-btn-filled px-3.5 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer"
+                            >
+                              <MaterialSymbol name="download" className="text-xs" />
+                              <span>Download</span>
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="font-mono text-xs sm:text-sm break-all leading-relaxed text-[var(--md-sys-color-on-surface)]">
+                        {pkt.text}
+                      </p>
+                    )}
+
+                    {/* Pill Action Row */}
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      {!pkt.isFilePayload && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPayloadText(pkt.text);
+                            setAttachedFile(null);
+                            setStatusBannerMsg('Loaded decoded payload into Transmitter.');
+                            onNotify?.('Loaded into Transmitter', 'Ready to rebroadcast', 'info');
+                          }}
+                          className="m3-btn-tonal px-3.5 py-1.5 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                        >
+                          <MaterialSymbol name="replay" className="text-xs" />
+                          <span>Relay</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(pkt.fileContent || pkt.text);
+                          setCopiedId(pkt.id);
+                          onNotify?.('Copied Decoded Payload', `CRC ${pkt.crc}`, 'success');
+                          setTimeout(() => setCopiedId(null), 1500);
+                        }}
+                        className="px-3.5 py-1.5 rounded-full text-xs font-semibold m3-btn-tonal flex items-center gap-1 cursor-pointer"
+                      >
+                        <MaterialSymbol
+                          name={copiedId === pkt.id ? 'check' : 'content_copy'}
+                          className="text-xs"
+                        />
+                        <span>{copiedId === pkt.id ? 'Copied' : 'Copy'}</span>
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

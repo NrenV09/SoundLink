@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
 import { ProfileModal } from './components/ProfileModal';
 import { SecureChatNode } from './components/SecureChatNode';
 import { QRUtilityNode } from './components/QRUtilityNode';
@@ -9,16 +8,13 @@ import { generateRandomName } from './lib/nameGenerator';
 import { UserProfile, ChatMessage } from './types';
 import { EasterEggModal } from './components/EasterEggModal';
 import { NexusInfoModal } from './components/NexusInfoModal';
-import { QuantumAppIcon } from './components/QuantumAppIcon';
 import { CookieConsentBanner } from './components/CookieConsentBanner';
 import { cacheStorageManager, CachedFileMetadata } from './lib/cacheStorage';
 import {
   MaterialThemeState,
   DEFAULT_MATERIAL_THEME,
-  MATERIAL_SEED_PRESETS,
   applyMaterialThemeToDocument,
   triggerHaptic,
-  MaterialSymbol,
 } from './lib/materialTheme';
 import { MaterialYouSettingsModal } from './components/MaterialYouSettingsModal';
 import {
@@ -26,8 +22,15 @@ import {
   subscribeWaverEngineStatus,
   WaverEngineStatus,
 } from './lib/waverEngine';
-
-type ActiveModuleTab = 'waver' | 'chat' | 'qr' | 'base64';
+import { Header, ActiveModuleTab } from './components/layout/Header';
+import { TelemetryStrip, LiveStudioTelemetry } from './components/layout/TelemetryStrip';
+import { OfflineVaultDrawer } from './components/layout/OfflineVaultDrawer';
+import { MobileDock } from './components/layout/MobileDock';
+import {
+  ToastContainer,
+  StudioToastItem,
+  StudioToastType,
+} from './components/layout/ToastContainer';
 
 export default function App() {
   const [profile, setProfile] = useState<UserProfile>(() => {
@@ -43,7 +46,7 @@ export default function App() {
     const newProfile: UserProfile = {
       id: `NODE-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
       username: generateRandomName(),
-      avatarColor: 'bg-blue-500',
+      avatarColor: 'bg-indigo-500',
       bio: 'Acoustic FSK Node · 100% Offline Air-Gapped',
       joinedAt: new Date().toLocaleDateString(),
     };
@@ -74,6 +77,15 @@ export default function App() {
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
   const [isCacheDrawerOpen, setIsCacheDrawerOpen] = useState(false);
   const [cachedFiles, setCachedFiles] = useState<CachedFileMetadata[]>([]);
+  const [workspaceWidth, setWorkspaceWidth] = useState<'standard' | 'wide' | 'full'>(() => {
+    try {
+      const saved = localStorage.getItem('soundlink_workspace_width');
+      if (saved === 'standard' || saved === 'wide' || saved === 'full') return saved;
+    } catch {
+      // Ignore
+    }
+    return 'wide';
+  });
 
   const [wasmStatus, setWasmStatus] = useState<WaverEngineStatus>({
     ready: false,
@@ -85,6 +97,16 @@ export default function App() {
     error: null,
   });
 
+  const [liveTelemetry, setLiveTelemetry] = useState<LiveStudioTelemetry>({
+    decodedCount: 0,
+    isListening: false,
+    isTransmitting: false,
+    liveRmsDb: -60,
+    dominantFreqHz: 0,
+    activeBandLabel: 'AUDIBLE',
+  });
+
+  const [toasts, setToasts] = useState<StudioToastItem[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
 
@@ -92,6 +114,21 @@ export default function App() {
   const [, setLogoClicks] = useState(0);
   const [isEasterEggOpen, setIsEasterEggOpen] = useState(false);
   const logoClickTimeoutRef = useRef<number | null>(null);
+
+  const pushToast = useCallback(
+    (title: string, description?: string, type: StudioToastType = 'info') => {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      setToasts((prev) => [...prev.slice(-3), { id, title, description, type }]);
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 3800);
+    },
+    []
+  );
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   // Preload ggwave WASM engine immediately when App mounts
   useEffect(() => {
@@ -127,6 +164,30 @@ export default function App() {
     }
   }, [activeTab]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('soundlink_workspace_width', workspaceWidth);
+    } catch {
+      // Ignore
+    }
+  }, [workspaceWidth]);
+
+  const containerWidthClass =
+    workspaceWidth === 'standard'
+      ? 'max-w-5xl'
+      : workspaceWidth === 'wide'
+      ? 'max-w-[1440px]'
+      : 'max-w-none';
+
+  const cycleWorkspaceWidth = () => {
+    triggerHaptic('light', themeState.hapticsEnabled);
+    setWorkspaceWidth((prev) => {
+      const next = prev === 'standard' ? 'wide' : prev === 'wide' ? 'full' : 'standard';
+      pushToast(`Workspace Width: ${next}`, undefined, 'info');
+      return next;
+    });
+  };
+
   const handleLogoClick = () => {
     setLogoClicks((prev) => {
       const next = prev + 1;
@@ -152,6 +213,7 @@ export default function App() {
     } catch {
       // Ignore
     }
+    pushToast('Node Profile Updated', `Active handle: ${newProfile.username}`, 'success');
   };
 
   const lastIncomingDedupeRef = useRef<{ signature: string; time: number }>({
@@ -184,6 +246,7 @@ export default function App() {
       audioData,
     };
     setChatMessages((prev) => [...prev, msg]);
+    pushToast('Voice Note Recorded', 'Encoded as 16-bit PCM WAV', 'success');
   };
 
   const handleIncomingAcousticChat = useCallback(
@@ -279,384 +342,95 @@ export default function App() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      pushToast('Exported Standalone HTML', 'SoundLink_Waver_Offline.html saved', 'success');
     } catch {
-      // Ignore
+      pushToast('HTML Export Failed', undefined, 'error');
     }
   };
 
-  const isDark = themeState.mode === 'dark';
-
   return (
     <div
-      className="min-h-screen flex flex-col selection:bg-blue-500/30 relative overflow-x-hidden pb-28 sm:pb-10"
+      className="min-h-screen flex flex-col selection:bg-indigo-500/30 relative overflow-x-hidden pb-28 sm:pb-10"
       style={{
         background: 'var(--md-sys-color-surface)',
         color: 'var(--md-sys-color-on-surface)',
       }}
     >
-      {/* Dynamic Material You Ambient Wallpaper Backdrop */}
-      {themeState.customWallpaperUrl ? (
-        <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+      {/* Ambient Radial Studio Glow + Micro Dot-Grid Texture */}
+      <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+        {themeState.customWallpaperUrl && (
           <img
             src={themeState.customWallpaperUrl}
             alt=""
             referrerPolicy="no-referrer"
-            className="w-full h-full object-cover opacity-20 dark:opacity-15 scale-110 blur-3xl transition-opacity duration-700"
+            className="w-full h-full object-cover opacity-15 scale-110 blur-3xl transition-opacity duration-700"
           />
-          <div
-            className="absolute inset-0"
-            style={{
-              background:
-                'radial-gradient(circle at 50% 0%, transparent 0%, var(--md-sys-color-surface) 85%)',
-            }}
-          />
-        </div>
-      ) : (
-        <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
-          <div
-            className="absolute -top-36 -left-36 w-[28rem] h-[28rem] rounded-full opacity-25 blur-3xl transition-colors duration-700"
-            style={{ background: 'var(--md-sys-color-primary-container)' }}
-          />
-          <div
-            className="absolute top-1/3 -right-36 w-[28rem] h-[28rem] rounded-full opacity-20 blur-3xl transition-colors duration-700"
-            style={{ background: 'var(--md-sys-color-tertiary-container)' }}
-          />
-        </div>
-      )}
+        )}
+        <div
+          className="absolute -top-48 left-1/2 -translate-x-1/2 w-[56rem] h-[28rem] rounded-full opacity-20 blur-3xl transition-colors duration-700"
+          style={{
+            background: `radial-gradient(circle, ${themeState.seedHex} 0%, transparent 70%)`,
+          }}
+        />
+        <div className="absolute inset-0 studio-dot-grid opacity-80" />
+      </div>
 
-      {/* Clean, Unboxed Android 16 Material You Top Bar */}
-      <header
-        className="sticky top-0 z-30 backdrop-blur-xl transition-colors"
-        style={{
-          backgroundColor: 'color-mix(in srgb, var(--md-sys-color-surface) 82%, transparent)',
+      {/* Sticky Frosted-Glass Command Header */}
+      <Header
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        unreadChatCount={unreadChatCount}
+        profile={profile}
+        onOpenProfile={() => setIsProfileOpen(true)}
+        themeState={themeState}
+        onUpdateTheme={setThemeState}
+        isColorPickerOpen={isColorPickerOpen}
+        onToggleColorPicker={() => setIsColorPickerOpen((v) => !v)}
+        onCloseColorPicker={() => setIsColorPickerOpen(false)}
+        onOpenFullStudio={() => setIsM3SettingsOpen(true)}
+        isCacheDrawerOpen={isCacheDrawerOpen}
+        onToggleCacheDrawer={() => {
+          refreshCachedFiles();
+          setIsCacheDrawerOpen((v) => !v);
         }}
-      >
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-4">
-          {/* Zone 1: Brand Lockup */}
-          <div className="flex items-center gap-2.5 shrink-0">
-            <div
-              onClick={handleLogoClick}
-              className="relative flex items-center justify-center cursor-pointer select-none transition-transform active:scale-90"
-              title="Click 5 times for secret telemetry"
-            >
-              <QuantumAppIcon
-                preset={themeState.appIconPreset}
-                shape={themeState.appIconShape}
-                size="sm"
-              />
-            </div>
-            <span className="text-base sm:text-lg font-extrabold tracking-tight text-[var(--md-sys-color-on-surface)] whitespace-nowrap">
-              Sound Link
-            </span>
-          </div>
-
-          {/* Zone 2: Desktop Floating Pill Navigation */}
-          <nav
-            className="hidden md:flex items-center p-1 rounded-full gap-1"
-            style={{ background: 'var(--md-sys-color-surface-container-low)' }}
-          >
-            {(
-              [
-                { id: 'waver', label: 'Acoustic Studio', icon: 'surround_sound' },
-                { id: 'chat', label: 'Sonic Chat', icon: 'forum', badge: unreadChatCount },
-                { id: 'qr', label: 'QR Code', icon: 'qr_code_2' },
-                { id: 'base64', label: 'Base64', icon: 'data_object' },
-              ] as const
-            ).map((tab) => {
-              const isActive = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => {
-                    triggerHaptic('light', themeState.hapticsEnabled);
-                    setActiveTab(tab.id);
-                  }}
-                  className="relative flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold tracking-wide transition-all cursor-pointer whitespace-nowrap shrink-0"
-                  style={{
-                    background: isActive
-                      ? 'var(--md-sys-color-secondary-container)'
-                      : 'transparent',
-                    color: isActive
-                      ? 'var(--md-sys-color-on-secondary-container)'
-                      : 'var(--md-sys-color-on-surface-variant)',
-                  }}
-                >
-                  <MaterialSymbol name={tab.icon} filled={isActive} className="text-sm" />
-                  <span>{tab.label}</span>
-                  {'badge' in tab && tab.badge ? (
-                    <span
-                      className="px-1.5 py-0.5 text-[10px] rounded-full font-extrabold"
-                      style={{
-                        background: 'var(--md-sys-color-primary)',
-                        color: 'var(--md-sys-color-on-primary)',
-                      }}
-                    >
-                      {tab.badge}
-                    </span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Zone 3: Compact Touch-Friendly Action Controls (44x44px hitboxes on mobile) */}
-          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-            {/* Identity Chip */}
-            <button
-              onClick={() => {
-                triggerHaptic('light', themeState.hapticsEnabled);
-                setIsProfileOpen(true);
-              }}
-              className="m3-btn-tonal min-h-[40px] px-3 sm:px-3.5 py-1.5 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-              title="Node Identity Profile"
-            >
-              <span className="truncate max-w-[84px] sm:max-w-[120px]">
-                {profile.username}
-              </span>
-            </button>
-
-            {/* Offline Cache Vault */}
-            <button
-              onClick={() => {
-                triggerHaptic('light', themeState.hapticsEnabled);
-                refreshCachedFiles();
-                setIsCacheDrawerOpen((v) => !v);
-              }}
-              className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
-              title="Offline Sandbox Cache & WASM Vault"
-            >
-              <MaterialSymbol name="database" className="text-lg" />
-            </button>
-
-            {/* Quick Seed Color Swatch Popover (Desktop/Tablet) */}
-            <div className="relative hidden sm:block">
-              <button
-                onClick={() => {
-                  triggerHaptic('light', themeState.hapticsEnabled);
-                  setIsColorPickerOpen((v) => !v);
-                }}
-                className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
-                title="Material You Theme & Seed Color"
-              >
-                <MaterialSymbol name="palette" className="text-lg" />
-              </button>
-
-              <AnimatePresence>
-                {isColorPickerOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.92, y: 8 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.92, y: 8 }}
-                    className="absolute right-0 mt-2 p-4 rounded-[28px] shadow-2xl z-50 w-60 flex flex-col gap-3"
-                    style={{ background: 'var(--md-sys-color-surface-container-high)' }}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-[var(--md-sys-color-on-surface)]">
-                        Dynamic Seed
-                      </span>
-                      <button
-                        onClick={() => {
-                          setIsColorPickerOpen(false);
-                          setIsM3SettingsOpen(true);
-                        }}
-                        className="text-xs font-bold text-[var(--md-sys-color-primary)] hover:underline cursor-pointer"
-                      >
-                        Full Studio
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-4 gap-2.5">
-                      {MATERIAL_SEED_PRESETS.map((seed) => (
-                        <button
-                          key={seed.hex}
-                          onClick={() => {
-                            triggerHaptic('light', themeState.hapticsEnabled);
-                            setThemeState((prev) => ({
-                              ...prev,
-                              source: 'seed',
-                              seedHex: seed.hex,
-                            }));
-                            setIsColorPickerOpen(false);
-                          }}
-                          className={`w-10 h-10 rounded-full transition-transform hover:scale-110 flex items-center justify-center cursor-pointer ${
-                            themeState.seedHex.toUpperCase() === seed.hex.toUpperCase()
-                              ? 'ring-2 ring-offset-2 ring-[var(--md-sys-color-on-surface)] ring-offset-[var(--md-sys-color-surface-container-high)] scale-105'
-                              : ''
-                          }`}
-                          style={{ backgroundColor: seed.hex }}
-                          title={seed.name}
-                        />
-                      ))}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
-            {/* Info & Documentation Modal */}
-            <button
-              onClick={() => {
-                triggerHaptic('light', themeState.hapticsEnabled);
-                setInfoModalTab('guide');
-                setIsInfoModalOpen(true);
-              }}
-              className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
-              title="Waver Acoustic Guide & Offline Specs"
-            >
-              <MaterialSymbol name="help" className="text-lg" />
-            </button>
-
-            {/* Dark / Light Mode Toggle */}
-            <button
-              onClick={() => {
-                triggerHaptic('light', themeState.hapticsEnabled);
-                setThemeState((prev) => ({
-                  ...prev,
-                  mode: prev.mode === 'dark' ? 'light' : 'dark',
-                }));
-              }}
-              className="min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition-colors hover:bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface-variant)] hover:text-[var(--md-sys-color-primary)] cursor-pointer"
-              title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-            >
-              <MaterialSymbol name={isDark ? 'light_mode' : 'dark_mode'} className="text-lg" />
-            </button>
-          </div>
-        </div>
-      </header>
+        cachedFileCount={cachedFiles.length}
+        workspaceWidth={workspaceWidth}
+        onCycleWorkspaceWidth={cycleWorkspaceWidth}
+        containerWidthClass={containerWidthClass}
+        wasmStatus={wasmStatus}
+        isMicActive={liveTelemetry.isListening}
+        onOpenGuide={() => {
+          setInfoModalTab('guide');
+          setIsInfoModalOpen(true);
+        }}
+        onLogoClick={handleLogoClick}
+        onNotify={(title, desc) => pushToast(title, desc, 'success')}
+      />
 
       {/* Main Content Container */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-3.5 sm:px-6 pt-2 pb-6 flex flex-col gap-5 relative z-10">
-        {/* Collapsible Offline Cache & WebAssembly Storage Drawer */}
-        <AnimatePresence>
-          {isCacheDrawerOpen && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              className="overflow-hidden"
-            >
-              <div
-                className="p-5 sm:p-6 rounded-[32px] space-y-4"
-                style={{ background: 'var(--md-sys-color-surface-container)' }}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-10 h-10 rounded-full flex items-center justify-center shrink-0"
-                      style={{
-                        background: 'var(--md-sys-color-primary-container)',
-                        color: 'var(--md-sys-color-on-primary-container)',
-                      }}
-                    >
-                      <MaterialSymbol name="database" className="text-lg" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-[var(--md-sys-color-on-surface)]">
-                        Offline Memory & CacheStorage Vault
-                      </h3>
-                      <p className="text-xs text-[var(--md-sys-color-on-surface-variant)]">
-                        {wasmStatus.ready
-                          ? `ggwave WASM (${wasmStatus.wasmSizeKB} KB) compiled in ${wasmStatus.initTimeMs}ms & locked in CacheStorage`
-                          : 'Initializing ggwave WebAssembly in memory...'}
-                      </p>
-                    </div>
-                  </div>
+      <main
+        className={`flex-1 ${containerWidthClass} w-full mx-auto px-3 sm:px-6 pt-4 pb-6 flex flex-col gap-4 relative z-10 transition-[max-width] duration-300`}
+      >
+        {/* Live Telemetry Summary Strip */}
+        <TelemetryStrip
+          wasmStatus={wasmStatus}
+          liveTelemetry={liveTelemetry}
+          chatMessageCount={chatMessages.length}
+          cachedFiles={cachedFiles}
+          onOpenVaultDrawer={() => {
+            refreshCachedFiles();
+            setIsCacheDrawerOpen(true);
+          }}
+        />
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={handleDownloadSingleFile}
-                      className="m3-btn-tonal px-4 py-2 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <MaterialSymbol name="download" className="text-sm" />
-                      <span>Save Standalone HTML</span>
-                    </button>
-                    {cachedFiles.length > 0 && (
-                      <button
-                        onClick={async () => {
-                          await cacheStorageManager.clearCache();
-                          refreshCachedFiles();
-                        }}
-                        className="px-3.5 py-2 rounded-full text-xs font-semibold text-rose-400 hover:bg-rose-500/10 cursor-pointer"
-                      >
-                        Clear Files
-                      </button>
-                    )}
-                    <button
-                      onClick={() => setIsCacheDrawerOpen(false)}
-                      className="p-2 rounded-full hover:bg-black/10 text-[var(--md-sys-color-on-surface-variant)] cursor-pointer"
-                    >
-                      <MaterialSymbol name="close" className="text-sm" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  <div
-                    className="p-4 rounded-3xl flex items-center justify-between gap-3"
-                    style={{
-                      background: 'var(--md-sys-color-primary-container)',
-                      color: 'var(--md-sys-color-on-primary-container)',
-                    }}
-                  >
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold truncate">
-                        ggwave-waver-engine.wasm
-                      </div>
-                      <p className="text-[11px] font-mono opacity-80 mt-0.5">
-                        {wasmStatus.wasmSizeKB} KB · 48kHz FSK + ECC
-                      </p>
-                    </div>
-                    <span className="text-[11px] font-bold opacity-90 shrink-0">
-                      Cached
-                    </span>
-                  </div>
-
-                  {cachedFiles.map((file) => (
-                    <div
-                      key={file.url}
-                      className="p-4 rounded-3xl flex items-center justify-between gap-2"
-                      style={{ background: 'var(--md-sys-color-surface-container-high)' }}
-                    >
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold truncate text-[var(--md-sys-color-on-surface)]">
-                          {file.name}
-                        </div>
-                        <div className="text-[11px] font-mono text-[var(--md-sys-color-on-surface-variant)]">
-                          {(file.size / 1024).toFixed(1)} KB
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          onClick={() => cacheStorageManager.downloadCachedFile(file.url, file.name)}
-                          className="p-2 rounded-full hover:bg-black/10 text-[var(--md-sys-color-primary)] cursor-pointer"
-                          title="Download from Offline Cache"
-                        >
-                          <MaterialSymbol name="download" className="text-sm" />
-                        </button>
-                        <button
-                          onClick={async () => {
-                            await cacheStorageManager.deleteCachedFile(file.url);
-                            refreshCachedFiles();
-                          }}
-                          className="p-2 rounded-full hover:bg-black/10 text-rose-400 cursor-pointer"
-                          title="Remove from Cache"
-                        >
-                          <MaterialSymbol name="delete" className="text-sm" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Active Module Workspace */}
+        {/* Active Module Workspace (100% Preserved Logic) */}
         {activeTab === 'waver' && (
           <WaverSonicNode
             senderName={profile.username}
             onPacketDecoded={handlePacketDecodedFromWaver}
             onCacheUpdated={refreshCachedFiles}
+            onNotify={pushToast}
+            onTelemetryUpdate={setLiveTelemetry}
           />
         )}
 
@@ -667,112 +441,87 @@ export default function App() {
             onSendVoiceMessage={handleSendVoiceMessage}
             onIncomingAcousticMessage={handleIncomingAcousticChat}
             senderName={profile.username}
+            onNotify={pushToast}
           />
         )}
 
         {activeTab === 'qr' && (
-          <div className="max-w-4xl mx-auto w-full">
-            <QRUtilityNode />
+          <div className="w-full flex-1">
+            <QRUtilityNode onNotify={pushToast} />
           </div>
         )}
 
         {activeTab === 'base64' && (
-          <div className="max-w-4xl mx-auto w-full">
-            <Base64ToolNode />
+          <div className="w-full flex-1">
+            <Base64ToolNode onNotify={pushToast} />
           </div>
         )}
       </main>
 
-      {/* Subtle Unboxed Footer (Desktop) */}
-      <footer className="hidden sm:flex max-w-6xl w-full mx-auto px-6 py-6 items-center justify-between gap-4 text-xs text-[var(--md-sys-color-on-surface-variant)]">
-        <span>
+      {/* Subtle Unboxed Studio Footer (Desktop) */}
+      <footer
+        className={`hidden sm:flex ${containerWidthClass} w-full mx-auto px-6 py-5 items-center justify-between gap-4 text-xs text-[var(--md-sys-color-on-surface-variant)] transition-[max-width] duration-300 relative z-10 border-t`}
+        style={{ borderColor: 'var(--studio-border)' }}
+      >
+        <span className="font-mono text-[11px]">
           Sound Link · Waver ggwave WebAssembly · 100% Offline Air-Gapped Audio Suite
         </span>
         <div className="flex items-center gap-5">
           <button
+            type="button"
             onClick={() => {
               setInfoModalTab('legal');
               setIsInfoModalOpen(true);
             }}
-            className="hover:text-[var(--md-sys-color-primary)] transition-colors cursor-pointer"
+            className="hover:text-[var(--studio-accent)] transition-colors cursor-pointer"
           >
-            Privacy & Legal
+            Privacy &amp; Legal
           </button>
           <button
+            type="button"
             onClick={handleDownloadSingleFile}
-            className="hover:text-[var(--md-sys-color-primary)] font-semibold transition-colors cursor-pointer"
+            className="hover:text-[var(--studio-accent)] font-semibold transition-colors cursor-pointer"
           >
             Export Offline HTML
           </button>
         </div>
       </footer>
 
-      {/* Floating Expressive Pill Dock Navigation Bar (Mobile & Small Tablets) */}
-      <nav className="md:hidden fixed bottom-3 left-3 right-3 z-40 m3-nav-bar rounded-full px-2 py-1.5">
-        <div className="grid grid-cols-5 gap-1 max-w-md mx-auto">
-          {(
-            [
-              { id: 'waver', label: 'Acoustic', icon: 'surround_sound' },
-              { id: 'chat', label: 'Chat', icon: 'forum', badge: unreadChatCount },
-              { id: 'qr', label: 'QR', icon: 'qr_code_2' },
-              { id: 'base64', label: 'Base64', icon: 'data_object' },
-              { id: 'theme', label: 'Theme', icon: 'palette' },
-            ] as const
-          ).map((item) => {
-            const isActive = item.id === 'theme' ? isM3SettingsOpen : activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => {
-                  triggerHaptic('light', themeState.hapticsEnabled);
-                  if (item.id === 'theme') {
-                    setIsM3SettingsOpen(true);
-                  } else {
-                    setActiveTab(item.id);
-                  }
-                }}
-                className="flex flex-col items-center justify-center min-h-[48px] rounded-full transition-all relative cursor-pointer"
-              >
-                <div
-                  className={`w-12 h-7 rounded-full flex items-center justify-center transition-all duration-200 ${
-                    isActive ? 'scale-105' : 'opacity-75'
-                  }`}
-                  style={{
-                    background: isActive
-                      ? 'var(--md-sys-color-secondary-container)'
-                      : 'transparent',
-                    color: isActive
-                      ? 'var(--md-sys-color-on-secondary-container)'
-                      : 'var(--md-sys-color-on-surface-variant)',
-                  }}
-                >
-                  <MaterialSymbol name={item.icon} filled={isActive} className="text-base" />
-                </div>
-                <span
-                  className={`text-[10px] mt-0.5 tracking-tight whitespace-nowrap ${
-                    isActive
-                      ? 'font-extrabold text-[var(--md-sys-color-on-surface)]'
-                      : 'font-medium text-[var(--md-sys-color-on-surface-variant)]'
-                  }`}
-                >
-                  {item.label}
-                </span>
-                {'badge' in item && item.badge ? (
-                  <span
-                    className="absolute top-0.5 right-2.5 w-4 h-4 rounded-full text-[9px] font-bold flex items-center justify-center"
-                    style={{
-                      background: 'var(--md-sys-color-primary)',
-                      color: 'var(--md-sys-color-on-primary)',
-                    }}
-                  >
-                    {item.badge}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-      </nav>
+      {/* Contextual Slide-Over Offline Vault Drawer */}
+      <OfflineVaultDrawer
+        isOpen={isCacheDrawerOpen}
+        onClose={() => setIsCacheDrawerOpen(false)}
+        wasmStatus={wasmStatus}
+        cachedFiles={cachedFiles}
+        onDownloadCachedFile={(url, name) => {
+          cacheStorageManager.downloadCachedFile(url, name);
+          pushToast('Downloading Artifact', name, 'success');
+        }}
+        onDeleteCachedFile={async (url) => {
+          await cacheStorageManager.deleteCachedFile(url);
+          refreshCachedFiles();
+          pushToast('Removed from Vault', undefined, 'info');
+        }}
+        onClearAllFiles={async () => {
+          await cacheStorageManager.clearCache();
+          refreshCachedFiles();
+          pushToast('Cleared Offline Vault', undefined, 'info');
+        }}
+        onDownloadSingleFile={handleDownloadSingleFile}
+      />
+
+      {/* Mobile Floating Dock */}
+      <MobileDock
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        unreadChatCount={unreadChatCount}
+        isM3SettingsOpen={isM3SettingsOpen}
+        onOpenThemeStudio={() => setIsM3SettingsOpen(true)}
+        themeState={themeState}
+      />
+
+      {/* Bottom-Right Live Toast Container */}
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
       {/* Modals */}
       <MaterialYouSettingsModal

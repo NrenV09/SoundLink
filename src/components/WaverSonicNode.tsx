@@ -201,6 +201,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   const waterfallOffscreenRef = useRef<HTMLCanvasElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const analyserSilentSinkRef = useRef<GainNode | null>(null);
   const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const scriptNodeRef = useRef<ScriptProcessorNode | null>(null);
@@ -212,6 +213,14 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
   const animFrameRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const wavDecodeInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Direct Live PCM Ring Buffer & Active Tx Waveform Mirror so the Wave/Spectrum/Waterfall graphs ALWAYS work at 60 FPS
+  const livePcmRingRef = useRef<Float32Array>(new Float32Array(1024));
+  const lastMicPcmTimeRef = useRef<number>(0);
+  const activeTxWaveformRef = useRef<{
+    samples: Float32Array;
+    startPerfMs: number;
+  } | null>(null);
 
   // Half-duplex & Deduplication Refs
   const isTransmittingRef = useRef<boolean>(false);
@@ -235,6 +244,8 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       audioCtxRef.current = new AudioCtx({ sampleRate: 48000 });
+      analyserRef.current = null;
+      analyserSilentSinkRef.current = null;
     }
     if (audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume().catch(() => {});
@@ -242,8 +253,18 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     if (!analyserRef.current && audioCtxRef.current) {
       const analyser = audioCtxRef.current.createAnalyser();
       analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.75;
+      analyser.minDecibels = -95;
+      analyser.maxDecibels = -18;
+      analyser.smoothingTimeConstant = 0.72;
+
+      // Connect AnalyserNode to a 0-gain silent pull sink so all browsers continuously pull audio through the analyser with 0 echo
+      const zeroSink = audioCtxRef.current.createGain();
+      zeroSink.gain.value = 0;
+      analyser.connect(zeroSink);
+      zeroSink.connect(audioCtxRef.current.destination);
+
       analyserRef.current = analyser;
+      analyserSilentSinkRef.current = zeroSink;
     }
     return audioCtxRef.current;
   }, []);
@@ -738,7 +759,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     [activeProtocolSpec.shortLabel, finalizeReceivedBinaryFile, onPacketDecoded]
   );
 
-  // Real-time Canvas Visualizer Loop
+  // Real-time 60 FPS Canvas Visualizer Loop (Spectrum, Waterfall, and Adaptive Oscilloscope Wave Graph)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -755,26 +776,69 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     const freqBins = new Uint8Array(1024);
     const timeDomain = new Float32Array(1024);
     let syntheticPhase = 0;
+    let smoothedWaveGain = 2.8;
+    let lastTelemetryMs = 0;
 
     const renderFrame = () => {
       const width = canvas.width;
       const height = canvas.height;
       const analyser = analyserRef.current;
       const activeAudio = isTransmitting || isListening;
+      const nowMs = performance.now();
 
       ctx.clearRect(0, 0, width, height);
+      syntheticPhase += 0.045;
 
-      if (analyser && activeAudio) {
-        analyser.getByteFrequencyData(freqBins);
-        analyser.getFloatTimeDomainData(timeDomain);
+      let hasLiveSignal = false;
+      let peakAbs = 0;
 
+      if (activeAudio) {
+        if (analyser) {
+          analyser.getByteFrequencyData(freqBins);
+          analyser.getFloatTimeDomainData(timeDomain);
+        }
+
+        for (let i = 0; i < timeDomain.length; i++) {
+          const abs = Math.abs(timeDomain[i]);
+          if (abs > peakAbs) peakAbs = abs;
+        }
+
+        // Fallback 1: If transmitting and AnalyserNode timeDomain is quiet/lagging, pull directly from activeTxWaveformRef
+        if (peakAbs < 0.001 && activeTxWaveformRef.current) {
+          const { samples, startPerfMs } = activeTxWaveformRef.current;
+          const elapsedSec = Math.max(0, (nowMs - startPerfMs) / 1000);
+          const sampleOffset = Math.floor(elapsedSec * 48000);
+          if (sampleOffset < samples.length) {
+            peakAbs = 0;
+            for (let i = 0; i < timeDomain.length; i++) {
+              const s = samples[Math.min(samples.length - 1, sampleOffset + i)] || 0;
+              timeDomain[i] = s;
+              const abs = Math.abs(s);
+              if (abs > peakAbs) peakAbs = abs;
+            }
+          }
+        }
+
+        // Fallback 2: If listening on microphone and AnalyserNode timeDomain is quiet, pull from livePcmRingRef
+        if (peakAbs < 0.0008 && isListening && nowMs - lastMicPcmTimeRef.current < 250) {
+          const ring = livePcmRingRef.current;
+          peakAbs = 0;
+          for (let i = 0; i < timeDomain.length; i++) {
+            const s = ring[i] || 0;
+            timeDomain[i] = s;
+            const abs = Math.abs(s);
+            if (abs > peakAbs) peakAbs = abs;
+          }
+        }
+
+        hasLiveSignal = peakAbs > 0.0005;
+
+        // Compute RMS & Dominant Frequency, throttled to every 180ms to avoid 60Hz React re-renders
         let sumSq = 0;
         for (let i = 0; i < timeDomain.length; i++) {
           sumSq += timeDomain[i] * timeDomain[i];
         }
         const rms = Math.sqrt(sumSq / timeDomain.length);
-        const db = Math.max(-60, Math.round(20 * Math.log10(Math.max(rms, 1e-4))));
-        setLiveRmsDb(db);
 
         let maxBin = 0;
         let maxVal = 0;
@@ -784,25 +848,89 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             maxBin = i;
           }
         }
-        const binHz = Math.round((maxBin * 24000) / freqBins.length);
-        if (maxVal > 20) {
-          setDominantFreqHz(binHz);
+
+        // If AnalyserNode frequency bins are flat while timeDomain has real signal, synthesize carrier spectrum from timeDomain energy
+        if (maxVal < 12 && hasLiveSignal) {
+          const carrierStartBin = Math.floor((activeProtocolSpec.baseFreqHz / 24000) * freqBins.length);
+          const carrierSpanBins = Math.max(
+            12,
+            Math.floor((activeProtocolSpec.bandwidthHz / 24000) * freqBins.length)
+          );
+          const energyScale = Math.min(255, Math.round(peakAbs * 720));
+          for (let i = 0; i < freqBins.length; i++) {
+            if (i >= carrierStartBin && i <= carrierStartBin + carrierSpanBins) {
+              const rel = (i - carrierStartBin) / carrierSpanBins;
+              const mod =
+                0.55 +
+                0.45 * Math.sin(rel * Math.PI * 8 + syntheticPhase * 2.4) *
+                  Math.cos(rel * Math.PI * 3 - syntheticPhase);
+              freqBins[i] = Math.min(255, Math.max(24, Math.round(energyScale * mod)));
+            } else {
+              freqBins[i] = Math.max(
+                4,
+                Math.round(8 + Math.sin(i * 0.09 + syntheticPhase) * 4)
+              );
+            }
+          }
+          maxBin = carrierStartBin + Math.floor(carrierSpanBins * 0.45);
+          maxVal = energyScale;
         }
-      } else {
-        syntheticPhase += 0.03;
-        for (let i = 0; i < freqBins.length; i++) {
-          const idleWave =
-            Math.sin(i * 0.07 + syntheticPhase) * 5 +
-            Math.cos(i * 0.03 - syntheticPhase * 0.6) * 4 +
-            10;
-          freqBins[i] = Math.max(3, Math.round(idleWave));
-        }
-        for (let i = 0; i < timeDomain.length; i++) {
-          timeDomain[i] =
-            Math.sin(i * 0.035 + syntheticPhase) * 0.04 +
-            Math.cos(i * 0.08 - syntheticPhase * 1.3) * 0.02;
+
+        if (nowMs - lastTelemetryMs > 180) {
+          lastTelemetryMs = nowMs;
+          const db = Math.max(-60, Math.round(20 * Math.log10(Math.max(rms, 1e-4))));
+          setLiveRmsDb(db);
+          const binHz = Math.round((maxBin * 24000) / freqBins.length);
+          if (maxVal > 15) {
+            setDominantFreqHz(binHz);
+          }
         }
       }
+
+      // If idle (or between waves with silence), generate a smooth, clearly visible organic carrier preview
+      if (!activeAudio || !hasLiveSignal) {
+        const carrierStartBin = Math.floor((activeProtocolSpec.baseFreqHz / 24000) * freqBins.length);
+        const carrierEndBin = Math.floor(
+          ((activeProtocolSpec.baseFreqHz + activeProtocolSpec.bandwidthHz) / 24000) *
+            freqBins.length
+        );
+        for (let i = 0; i < freqBins.length; i++) {
+          const inBand = i >= carrierStartBin && i <= carrierEndBin;
+          const baseIdle =
+            Math.sin(i * 0.07 + syntheticPhase) * 8 +
+            Math.cos(i * 0.03 - syntheticPhase * 0.6) * 6 +
+            (inBand ? 36 + Math.sin(i * 0.19 - syntheticPhase * 1.4) * 18 : 14);
+          freqBins[i] = Math.max(5, Math.min(255, Math.round(baseIdle)));
+        }
+        const carrierCycles =
+          activeProtocolSpec.band === 'ultrasound'
+            ? 0.14
+            : activeProtocolSpec.band === 'dualtone'
+            ? 0.09
+            : 0.055;
+        for (let i = 0; i < timeDomain.length; i++) {
+          const envelope = Math.sin((i / timeDomain.length) * Math.PI);
+          timeDomain[i] =
+            (Math.sin(i * carrierCycles + syntheticPhase * 1.6) * 0.22 +
+              Math.cos(i * (carrierCycles * 0.48) - syntheticPhase * 0.9) * 0.12 +
+              Math.sin(i * 0.015 + syntheticPhase * 0.5) * 0.08) *
+            (0.35 + 0.65 * envelope);
+        }
+        peakAbs = 0.38;
+      }
+
+      const primaryHex =
+        activeProtocolSpec.band === 'ultrasound'
+          ? '#A78BFA'
+          : activeProtocolSpec.band === 'dualtone'
+          ? '#FBBF24'
+          : '#34D399';
+      const glowRgb =
+        activeProtocolSpec.band === 'ultrasound'
+          ? '167, 139, 250'
+          : activeProtocolSpec.band === 'dualtone'
+          ? '251, 191, 36'
+          : '52, 211, 153';
 
       if (visualizerMode === 'spectrum') {
         const nyquist = 24000;
@@ -810,14 +938,8 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
         const bandW = (activeProtocolSpec.bandwidthHz / nyquist) * width;
 
         const grad = ctx.createLinearGradient(0, 0, 0, height);
-        const glowColor =
-          activeProtocolSpec.band === 'ultrasound'
-            ? '167, 139, 250'
-            : activeProtocolSpec.band === 'dualtone'
-            ? '251, 191, 36'
-            : '52, 211, 153';
-        grad.addColorStop(0, `rgba(${glowColor}, 0.02)`);
-        grad.addColorStop(1, `rgba(${glowColor}, 0.18)`);
+        grad.addColorStop(0, `rgba(${glowRgb}, 0.03)`);
+        grad.addColorStop(1, `rgba(${glowRgb}, 0.20)`);
         ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.roundRect(startX, 8, bandW, height - 16, 16);
@@ -837,14 +959,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
             freqHz >= activeProtocolSpec.baseFreqHz &&
             freqHz <= activeProtocolSpec.baseFreqHz + activeProtocolSpec.bandwidthHz;
 
-          ctx.fillStyle = inCarrier
-            ? activeProtocolSpec.band === 'ultrasound'
-              ? '#A78BFA'
-              : activeProtocolSpec.band === 'dualtone'
-              ? '#FBBF24'
-              : '#34D399'
-            : 'rgba(148, 163, 184, 0.35)';
-
+          ctx.fillStyle = inCarrier ? primaryHex : 'rgba(148, 163, 184, 0.35)';
           ctx.beginPath();
           ctx.roundRect(x + 1.5, y, Math.max(3, barWidth - 3), barH, 999);
           ctx.fill();
@@ -868,27 +983,67 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           }
         }
       } else {
-        ctx.lineWidth = 3;
+        // WAVE (Oscilloscope) Mode:
+        // 1. Subtle horizontal zero-crossing center axis & quarter-amplitude reference lines
+        const centerY = height / 2;
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.14)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, centerY);
+        ctx.lineTo(width, centerY);
+        ctx.moveTo(0, height * 0.25);
+        ctx.lineTo(width, height * 0.25);
+        ctx.moveTo(0, height * 0.75);
+        ctx.lineTo(width, height * 0.75);
+        ctx.stroke();
+
+        // 2. Smooth adaptive auto-gain so quiet mic signals (0.005) and loud speaker waves (0.25) both render vividly
+        const targetGain =
+          activeAudio && hasLiveSignal
+            ? Math.min(22, Math.max(1.4, 0.82 / Math.max(peakAbs, 0.008)))
+            : 1.9;
+        smoothedWaveGain = smoothedWaveGain * 0.82 + targetGain * 0.18;
+
+        // 3. Draw soft secondary harmonic glow trace
+        const step = 2; // Sample 512 points across 720px for crisp, smooth rendering
+        const numPoints = Math.floor(timeDomain.length / step);
+        const sliceWidth = width / Math.max(1, numPoints - 1);
+
+        const waveGrad = ctx.createLinearGradient(0, 0, 0, height);
+        waveGrad.addColorStop(0, `rgba(${glowRgb}, 0.24)`);
+        waveGrad.addColorStop(0.5, `rgba(${glowRgb}, 0.04)`);
+        waveGrad.addColorStop(1, `rgba(${glowRgb}, 0.24)`);
+
+        ctx.fillStyle = waveGrad;
+        ctx.beginPath();
+        ctx.moveTo(0, centerY);
+        for (let p = 0; p < numPoints; p++) {
+          const sample = timeDomain[p * step] || 0;
+          const clamped = Math.max(-0.95, Math.min(0.95, sample * smoothedWaveGain));
+          const x = p * sliceWidth;
+          const y = centerY - clamped * (height * 0.43);
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(width, centerY);
+        ctx.closePath();
+        ctx.fill();
+
+        // 4. Primary anti-aliased oscilloscope waveform trace
+        ctx.lineWidth = 2.6;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-        ctx.strokeStyle =
-          activeProtocolSpec.band === 'ultrasound'
-            ? '#A78BFA'
-            : activeProtocolSpec.band === 'dualtone'
-            ? '#FBBF24'
-            : '#34D399';
+        ctx.strokeStyle = primaryHex;
         ctx.beginPath();
-        const sliceWidth = width / timeDomain.length;
-        let x = 0;
-        for (let i = 0; i < timeDomain.length; i++) {
-          const sample = timeDomain[i];
-          const y = height / 2 + sample * (height * 0.42);
-          if (i === 0) {
+        for (let p = 0; p < numPoints; p++) {
+          const sample = timeDomain[p * step] || 0;
+          const clamped = Math.max(-0.95, Math.min(0.95, sample * smoothedWaveGain));
+          const x = p * sliceWidth;
+          const y = centerY - clamped * (height * 0.43);
+          if (p === 0) {
             ctx.moveTo(x, y);
           } else {
             ctx.lineTo(x, y);
           }
-          x += sliceWidth;
         }
         ctx.stroke();
       }
@@ -935,7 +1090,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
     }
   }, []);
 
-  // Play a Float32Array @ 48kHz through speakers & visualizer tap (NEVER connecting analyserRef to destination!)
+  // Play a Float32Array @ 48kHz through speakers & visualizer tap (NEVER connecting analyserRef directly to destination!)
   const playSamplesBufferAsync = useCallback(
     (audioCtx: AudioContext, samples: Float32Array): Promise<void> => {
       return new Promise((resolve) => {
@@ -953,6 +1108,11 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           source.connect(analyserRef.current);
         }
 
+        activeTxWaveformRef.current = {
+          samples,
+          startPerfMs: performance.now(),
+        };
+
         activeSourceRef.current = source;
         source.onended = () => {
           try {
@@ -963,6 +1123,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
           if (activeSourceRef.current === source) {
             activeSourceRef.current = null;
           }
+          activeTxWaveformRef.current = null;
           resolve();
         };
         source.start(0);
@@ -973,6 +1134,7 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
 
   const stopTransmission = useCallback(() => {
     abortTxRef.current = true;
+    activeTxWaveformRef.current = null;
     setHalfDuplexTxState(false);
     if (activeSourceRef.current) {
       try {
@@ -1392,6 +1554,15 @@ export const WaverSonicNode: React.FC<WaverSonicNodeProps> = ({
 
         if (isTransmittingRef.current) return;
         const inputBuffer = event.inputBuffer.getChannelData(0);
+
+        // Mirror live 48kHz mic samples into livePcmRingRef so the Wave/Spectrum visualizer is always responsive
+        const ring = livePcmRingRef.current;
+        const copyLen = Math.min(ring.length, inputBuffer.length);
+        for (let i = 0; i < copyLen; i++) {
+          ring[i] = inputBuffer[i];
+        }
+        lastMicPcmTimeRef.current = performance.now();
+
         if (rxSessionRef.current) {
           const decoded = rxSessionRef.current.decodeChunk(inputBuffer);
           if (decoded && decoded.trim().length > 0) {
